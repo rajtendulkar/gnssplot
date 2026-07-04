@@ -1,8 +1,18 @@
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Optional
+
+
+@dataclass
+class SatelliteInfo:
+    sat_id: int
+    elevation_deg: Optional[float]
+    azimuth_deg: Optional[float]
+    snr_dbhz: Optional[float]
+    constellation: str
 
 
 @dataclass
@@ -19,7 +29,9 @@ class NMEAPoint:
     speed_knots: Optional[float]
     ground_speed_knots: Optional[float]
     ground_speed_kmh: Optional[float]
-    raw_sentence: Optional[str]
+    satellites: List[SatelliteInfo] = field(default_factory=list)
+    used_satellite_ids: List[int] = field(default_factory=list)
+    raw_sentence: Optional[str] = None
 
 
 @dataclass
@@ -46,6 +58,43 @@ class NMEADataset:
             return None
         safe_idx = max(0, min(index, len(self.points) - 1))
         return self.points[safe_idx]
+
+    def sample_index_at_or_before_time(
+        self, target_time: datetime, prefer_sentence_suffix: str | None = None
+    ) -> Optional[int]:
+        timed_indices: list[int] = []
+        timed_values: list[datetime] = []
+
+        for idx, point in enumerate(self.points):
+            if point.timestamp is None:
+                continue
+            timed_indices.append(idx)
+            timed_values.append(point.timestamp)
+
+        if not timed_values:
+            return None
+
+        pos = bisect_right(timed_values, target_time) - 1
+        if pos < 0:
+            return None
+
+        if prefer_sentence_suffix is not None and timed_values[pos] == target_time:
+            idx = pos
+            while idx >= 0 and timed_values[idx] == target_time:
+                point = self.points[timed_indices[idx]]
+                if point.raw_sentence and point.raw_sentence.endswith(prefer_sentence_suffix):
+                    return timed_indices[idx]
+                idx -= 1
+
+        return timed_indices[pos]
+
+    def sample_at_or_before_time(
+        self, target_time: datetime, prefer_sentence_suffix: str | None = None
+    ) -> Optional[NMEAPoint]:
+        idx = self.sample_index_at_or_before_time(target_time, prefer_sentence_suffix)
+        if idx is None:
+            return None
+        return self.points[idx]
 
     def summary(self) -> dict[str, float | int | str]:
         total_points = len(self.points)

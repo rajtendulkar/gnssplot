@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime
+from pathlib import Path
 from typing import Dict
 
 import pyqtgraph as pg
 from PyQt6.QtWidgets import QComboBox, QGridLayout, QHBoxLayout, QLabel, QToolButton, QVBoxLayout, QWidget
+from pyqtgraph.exporters import ImageExporter
 
 from app.core.models import NMEADataset
 
@@ -179,14 +182,160 @@ class ComparisonPlotWidget(QWidget):
                 pen = pg.mkPen(color=self.COLORS[dataset_index % len(self.COLORS)], width=2)
                 plot_item.plot(x=x_vals, y=y_vals, pen=pen, name=receiver)
 
+            self._apply_data_bounds(plot_item, metric)
+
     def update_datasets(self, datasets: Dict[str, NMEADataset]) -> None:
         self._datasets = datasets
         self._refresh_all_plots()
+        self.reset_all_views()
+
+    def reset_all_views(self) -> None:
+        for slot_index, plot_item in enumerate(self._plot_items):
+            metric = self._selected_metric(slot_index)
+            self._apply_data_bounds(plot_item, metric)
+
+    def export_panel_images(self, output_dir: str) -> list[tuple[str, str]]:
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        exported_files: list[tuple[str, str]] = []
+        for slot_index, plot_item in enumerate(self._plot_items, start=1):
+            metric = self._selected_metric(slot_index - 1)
+            metric_label = self.AVAILABLE_METRICS.get(metric, metric)
+            file_name = f"plot_{slot_index}_{metric}.png"
+            file_path = output_path / file_name
+
+            exporter = ImageExporter(plot_item)
+            try:
+                exporter.parameters()["width"] = max(800, int(self.width() / 2))
+            except Exception:
+                pass
+            exporter.export(str(file_path))
+            exported_files.append((file_name, str(file_path)))
+
+        return exported_files
+
+    def export_metric_gallery(
+        self,
+        datasets: Dict[str, NMEADataset],
+        output_dir: str,
+        group_name: str,
+    ) -> list[tuple[str, str]]:
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        exported_files: list[tuple[str, str]] = []
+        for metric, metric_label in self.AVAILABLE_METRICS.items():
+            plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem()})
+            self._configure_export_plot(plot)
+
+            plot.setTitle(f"{group_name}: {metric_label}", color=self._title_color, size="12pt")
+            plot.setLabel("bottom", "Time")
+            plot.setLabel("left", metric_label)
+            plot.addLegend(offset=(10, 10))
+
+            for dataset_index, (receiver, dataset) in enumerate(datasets.items()):
+                x_vals, y_vals = dataset.metric_series(metric)
+                if not x_vals:
+                    continue
+                pen = pg.mkPen(color=self.COLORS[dataset_index % len(self.COLORS)], width=2)
+                plot.plot(x=x_vals, y=y_vals, pen=pen, name=receiver)
+
+            self._apply_export_bounds(plot.getPlotItem(), metric, datasets)
+
+            file_name = f"{group_name}_{metric}.png"
+            file_path = output_path / file_name
+            exporter = ImageExporter(plot.getPlotItem())
+            try:
+                exporter.parameters()["width"] = max(1200, int(self.width()))
+            except Exception:
+                pass
+            exporter.export(str(file_path))
+            exported_files.append((f"{group_name}/{file_name}", str(file_path)))
+
+        return exported_files
+
+    def _configure_export_plot(self, plot: pg.PlotWidget) -> None:
+        plot.setBackground(self._plot_bg)
+        plot.showGrid(x=True, y=True, alpha=self._grid_alpha)
+        plot.getAxis("left").setPen(pg.mkPen(self._axis_pen, width=1))
+        plot.getAxis("left").setTextPen(pg.mkPen(self._axis_text_pen))
+        plot.getAxis("bottom").setPen(pg.mkPen(self._axis_pen, width=1))
+        plot.getAxis("bottom").setTextPen(pg.mkPen(self._axis_text_pen))
+
+    def _apply_export_bounds(
+        self,
+        plot_item: pg.PlotItem,
+        metric: str,
+        datasets: Dict[str, NMEADataset],
+    ) -> None:
+        x_values: list[float] = []
+        y_values: list[float] = []
+
+        for dataset in datasets.values():
+            xs, ys = dataset.metric_series(metric)
+            x_values.extend(xs)
+            y_values.extend(ys)
+
+        if x_values:
+            x_min = min(x_values)
+            x_max = max(x_values)
+            if x_min == x_max:
+                delta = max(1.0, abs(x_min) * 0.001)
+                x_min -= delta
+                x_max += delta
+            plot_item.setXRange(x_min, x_max, padding=0.02)
+        if y_values:
+            y_min = min(y_values)
+            y_max = max(y_values)
+            if y_min == y_max:
+                delta = max(0.1, abs(y_min) * 0.001)
+                y_min -= delta
+                y_max += delta
+            plot_item.setYRange(y_min, y_max, padding=0.08)
+
+    def _apply_data_bounds(self, plot_item: pg.PlotItem, metric: str) -> None:
+        x_values: list[float] = []
+        y_values: list[float] = []
+
+        for dataset in self._datasets.values():
+            xs, ys = dataset.metric_series(metric)
+            x_values.extend(xs)
+            y_values.extend(ys)
+
+        if x_values:
+            x_min = min(x_values)
+            x_max = max(x_values)
+            if x_min == x_max:
+                delta = max(1.0, abs(x_min) * 0.001)
+                x_min -= delta
+                x_max += delta
+            plot_item.setXRange(x_min, x_max, padding=0.02)
+        else:
+            plot_item.enableAutoRange(axis=pg.ViewBox.XAxis, enable=True)
+
+        if y_values:
+            y_min = min(y_values)
+            y_max = max(y_values)
+            if y_min == y_max:
+                delta = max(0.1, abs(y_min) * 0.001)
+                y_min -= delta
+                y_max += delta
+            plot_item.setYRange(y_min, y_max, padding=0.08)
+        else:
+            plot_item.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
 
     def set_playback_index(self, index: int) -> None:
         cursor_x = self._resolve_cursor_time(index)
         if cursor_x is None:
             return
+        for cursor in self._cursor_lines:
+            cursor.setValue(cursor_x)
+
+    def set_playback_time(self, timestamp: datetime | None) -> None:
+        if timestamp is None:
+            return
+        cursor_x = timestamp.timestamp()
         for cursor in self._cursor_lines:
             cursor.setValue(cursor_x)
 

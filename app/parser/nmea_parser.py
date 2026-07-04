@@ -4,7 +4,51 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
-from app.core.models import NMEADataset, NMEAPoint
+from app.core.models import NMEADataset, NMEAPoint, SatelliteInfo
+
+
+def parse_int_field(raw: str) -> Optional[int]:
+    if not raw:
+        return None
+    cleaned = raw.split("*")[0]
+    try:
+        return int(cleaned)
+    except ValueError:
+        return None
+
+
+def constellation_from_talker(talker: str) -> str:
+    if talker == "GP":
+        return "GPS"
+    if talker == "GL":
+        return "GLONASS"
+    if talker == "GA":
+        return "Galileo"
+    if talker in {"GB", "BD"}:
+        return "BeiDou"
+    if talker in {"QZ", "GQ"}:
+        return "QZSS"
+    if talker == "GI":
+        return "NavIC"
+    if talker == "GN":
+        return "Mixed"
+    return "Other"
+
+
+def constellation_from_svid(svid: int) -> str:
+    if 1 <= svid <= 32:
+        return "GPS"
+    if 65 <= svid <= 96:
+        return "GLONASS"
+    if 193 <= svid <= 200:
+        return "QZSS"
+    if 201 <= svid <= 237:
+        return "BeiDou"
+    if 301 <= svid <= 336:
+        return "Galileo"
+    if 401 <= svid <= 414:
+        return "NavIC"
+    return "Other"
 
 
 def parse_lat_lon(raw: str, direction: str) -> Optional[float]:
@@ -84,8 +128,15 @@ def parse_nmea_file(
     last_cn0: Optional[float] = None
     last_vtg_knots: Optional[float] = None
     last_vtg_kmh: Optional[float] = None
+    last_satellites: dict[int, SatelliteInfo] = {}
+    last_used_satellite_ids: set[int] = set()
     inferred_date: Optional[date] = None
     last_time_of_day: Optional[time] = None
+
+    def current_satellite_snapshot() -> tuple[list[SatelliteInfo], list[int]]:
+        satellites = sorted(last_satellites.values(), key=lambda s: (s.constellation, s.sat_id))
+        used_ids = sorted(last_used_satellite_ids)
+        return satellites, used_ids
 
     def build_timestamp(t: Optional[time]) -> Optional[datetime]:
         nonlocal inferred_date
@@ -149,6 +200,7 @@ def parse_nmea_file(
                 last_alt = alt if alt is not None else last_alt
                 last_sats = sats if sats is not None else last_sats
                 last_hdop = hdop if hdop is not None else last_hdop
+                sat_snapshot, used_ids = current_satellite_snapshot()
 
                 dataset.points.append(
                     NMEAPoint(
@@ -164,6 +216,8 @@ def parse_nmea_file(
                         speed_knots=last_speed,
                         ground_speed_knots=last_vtg_knots,
                         ground_speed_kmh=last_vtg_kmh,
+                        satellites=sat_snapshot,
+                        used_satellite_ids=used_ids,
                         raw_sentence=line,
                     )
                 )
@@ -189,6 +243,7 @@ def parse_nmea_file(
 
                 if status == "A":
                     last_speed = speed if speed is not None else last_speed
+                    sat_snapshot, used_ids = current_satellite_snapshot()
                     dataset.points.append(
                         NMEAPoint(
                             timestamp=dt,
@@ -203,6 +258,8 @@ def parse_nmea_file(
                             speed_knots=speed,
                             ground_speed_knots=last_vtg_knots,
                             ground_speed_kmh=last_vtg_kmh,
+                            satellites=sat_snapshot,
+                            used_satellite_ids=used_ids,
                             raw_sentence=line,
                         )
                     )
@@ -222,6 +279,13 @@ def parse_nmea_file(
                 pdop = parse_float_field(parts[15])
                 hdop = parse_float_field(parts[16])
                 vdop = parse_float_field(parts[17])
+                used_ids: set[int] = set()
+                for field_idx in range(3, 15):
+                    sat_id = parse_int_field(parts[field_idx])
+                    if sat_id is not None:
+                        used_ids.add(sat_id)
+                if used_ids:
+                    last_used_satellite_ids = used_ids
 
                 if pdop is not None:
                     last_pdop = pdop
@@ -233,6 +297,30 @@ def parse_nmea_file(
             # GSV: CN0(SNR) appears in every 4th satellite field of each message block.
             elif sentence.endswith("GSV") and len(parts) >= 8:
                 snr_values: list[float] = []
+                talker = sentence[1:3] if len(sentence) >= 3 else ""
+                talker_constellation = constellation_from_talker(talker)
+
+                for field_idx in range(4, len(parts), 4):
+                    sat_id = parse_int_field(parts[field_idx])
+                    if sat_id is None:
+                        continue
+                    elev = parse_float_field(parts[field_idx + 1]) if field_idx + 1 < len(parts) else None
+                    az = parse_float_field(parts[field_idx + 2]) if field_idx + 2 < len(parts) else None
+                    snr = parse_float_field(parts[field_idx + 3]) if field_idx + 3 < len(parts) else None
+
+                    constellation = (
+                        constellation_from_svid(sat_id)
+                        if talker_constellation == "Mixed"
+                        else talker_constellation
+                    )
+                    last_satellites[sat_id] = SatelliteInfo(
+                        sat_id=sat_id,
+                        elevation_deg=elev,
+                        azimuth_deg=az,
+                        snr_dbhz=snr,
+                        constellation=constellation,
+                    )
+
                 for field_idx in range(7, len(parts), 4):
                     snr = parse_float_field(parts[field_idx])
                     if snr is not None:

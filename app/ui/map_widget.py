@@ -14,6 +14,7 @@ class MapWidget(QWidget):
         self._loaded = False
         self._force_auto_zoom = True
         self._show_dots = False
+        self._follow_playback = True
         self._pending_positions: list[dict[str, dict[str, float | str | None]]] = []
         self._pending_scripts: list[str] = []
 
@@ -73,7 +74,7 @@ class MapWidget(QWidget):
                 dotLayers = {};
               }
 
-              function upsertReceiverMarker(receiver, lat, lng, timeText, forceAutoZoom, showDots) {
+              function upsertReceiverMarker(receiver, lat, lng, timeText, forceAutoZoom, showDots, followPlayback) {
                 if (lat === null || lng === null) return;
 
                 const position = [lat, lng];
@@ -113,8 +114,37 @@ class MapWidget(QWidget):
 
                 if (forceAutoZoom) {
                   map.setView(position, 16);
-                } else {
+                } else if (followPlayback) {
                   map.panTo(position);
+                }
+              }
+
+              function fitAllData() {
+                if (!map) return;
+
+                let bounds = null;
+
+                Object.values(polylines).forEach((line) => {
+                  const lineBounds = line.getBounds();
+                  if (!lineBounds.isValid()) return;
+                  if (bounds === null) {
+                    bounds = lineBounds;
+                  } else {
+                    bounds.extend(lineBounds);
+                  }
+                });
+
+                Object.values(markers).forEach((marker) => {
+                  const latlng = marker.getLatLng();
+                  if (bounds === null) {
+                    bounds = L.latLngBounds([latlng, latlng]);
+                  } else {
+                    bounds.extend(latlng);
+                  }
+                });
+
+                if (bounds && bounds.isValid()) {
+                  map.fitBounds(bounds.pad(0.2));
                 }
               }
             </script>
@@ -155,6 +185,12 @@ class MapWidget(QWidget):
     def set_show_dots(self, enabled: bool) -> None:
         self._show_dots = enabled
 
+    def set_follow_playback(self, enabled: bool) -> None:
+      self._follow_playback = enabled
+
+    def fit_visible(self) -> None:
+      self._run_js("fitAllData();")
+
     def reset_tracks(self) -> None:
         self._force_auto_zoom = True
         self._run_js("clearMapData();")
@@ -175,13 +211,14 @@ class MapWidget(QWidget):
                 continue
 
             do_auto_zoom = self._force_auto_zoom and not auto_zoom_applied
-            script = "upsertReceiverMarker(%s, %s, %s, %s, %s, %s);" % (
+            script = "upsertReceiverMarker(%s, %s, %s, %s, %s, %s, %s);" % (
                 json.dumps(receiver),
                 float(lat),
                 float(lon),
                 json.dumps(time_text),
                 "true" if do_auto_zoom else "false",
                 "true" if self._show_dots else "false",
+              "true" if self._follow_playback else "false",
             )
             self._run_js(script)
             if do_auto_zoom:

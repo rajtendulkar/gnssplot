@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
-from app.core.models import NMEADataset
+from app.core.models import NMEADataset, NMEAPoint
 
 
 class CoreEngine(QObject):
@@ -17,6 +17,8 @@ class CoreEngine(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.datasets: "OrderedDict[str, NMEADataset]" = OrderedDict()
+        self._timeline_mode: Literal["index", "aligned", "gga"] = "aligned"
+        self._aligned_timeline: list[datetime] = []
         self._max_points = 0
         self._index = 0
         self._is_playing = False
@@ -33,9 +35,17 @@ class CoreEngine(QObject):
     def index(self) -> int:
         return self._index
 
+    @property
+    def timeline_mode(self) -> Literal["index", "aligned", "gga"]:
+        return self._timeline_mode
+
+    def playback_time_at(self, index: int) -> Optional[datetime]:
+        return self._resolve_timestamp(index)
+
     def clear(self) -> None:
         self.pause()
         self.datasets.clear()
+        self._aligned_timeline.clear()
         self._max_points = 0
         self._index = 0
         self.datasets_changed.emit(dict(self.datasets))
@@ -43,9 +53,8 @@ class CoreEngine(QObject):
 
     def add_dataset(self, dataset: NMEADataset) -> None:
         self.datasets[dataset.receiver_name] = dataset
-        self._max_points = max((len(d.points) for d in self.datasets.values()), default=0)
-        if self._index >= self._max_points:
-            self._index = max(self._max_points - 1, 0)
+        self._recompute_timeline()
+        self._index = 0
         self.datasets_changed.emit(dict(self.datasets))
         self._emit_playback()
 
@@ -53,9 +62,15 @@ class CoreEngine(QObject):
         if receiver_name not in self.datasets:
             return
         del self.datasets[receiver_name]
-        self._max_points = max((len(d.points) for d in self.datasets.values()), default=0)
-        if self._index >= self._max_points:
-            self._index = max(self._max_points - 1, 0)
+        self._recompute_timeline()
+        self.datasets_changed.emit(dict(self.datasets))
+        self._emit_playback()
+
+    def set_timeline_mode(self, mode: Literal["index", "aligned", "gga"]) -> None:
+        if mode == self._timeline_mode:
+            return
+        self._timeline_mode = mode
+        self._recompute_timeline()
         self.datasets_changed.emit(dict(self.datasets))
         self._emit_playback()
 
@@ -85,6 +100,16 @@ class CoreEngine(QObject):
             self._index = max(0, min(index, self._max_points - 1))
         self._emit_playback()
 
+    def step_forward(self) -> None:
+        if self._is_playing:
+            return
+        if self._max_points <= 1:
+            return
+        if self._index >= self._max_points - 1:
+            return
+        self._index += 1
+        self._emit_playback()
+
     def _tick(self) -> None:
         if self._max_points <= 1:
             self.pause()
@@ -101,7 +126,7 @@ class CoreEngine(QObject):
 
         positions: dict[str, dict[str, float | str | None]] = {}
         for name, ds in self.datasets.items():
-            point = ds.sample_at(self._index)
+            _, point = self.resolve_dataset_point(ds, self._index)
             if not point:
                 continue
             positions[name] = {
@@ -113,8 +138,62 @@ class CoreEngine(QObject):
         self.playback_updated.emit(self._index, max(self._max_points - 1, 0), time_label, positions)
 
     def _resolve_timestamp(self, index: int) -> Optional[datetime]:
+        if self._timeline_mode in {"aligned", "gga"}:
+            if 0 <= index < len(self._aligned_timeline):
+                return self._aligned_timeline[index]
+            return None
+
         for ds in self.datasets.values():
             point = ds.sample_at(index)
             if point and point.timestamp:
                 return point.timestamp
         return None
+
+    def resolve_dataset_point(
+        self, dataset: NMEADataset, index: int
+    ) -> tuple[Optional[int], Optional[NMEAPoint]]:
+        if self._timeline_mode in {"aligned", "gga"}:
+            if not (0 <= index < len(self._aligned_timeline)):
+                return None, None
+            target_time = self._aligned_timeline[index]
+            prefer_suffix = "GGA" if self._timeline_mode == "gga" else None
+            sample_idx = dataset.sample_index_at_or_before_time(target_time, prefer_suffix)
+            if sample_idx is None:
+                return None, None
+            return sample_idx, dataset.points[sample_idx]
+
+        point = dataset.sample_at(index)
+        if point is None:
+            return None, None
+        safe_idx = max(0, min(index, len(dataset.points) - 1))
+        return safe_idx, point
+
+    def _recompute_timeline(self) -> None:
+        if self._timeline_mode in {"aligned", "gga"}:
+            times: set[datetime] = set()
+            for ds in self.datasets.values():
+                for point in ds.points:
+                    if point.timestamp is not None and (
+                        self._timeline_mode != "gga"
+                        or (point.raw_sentence is not None and point.raw_sentence.endswith("GGA"))
+                    ):
+                        times.add(point.timestamp)
+
+                # If a dataset has no GGA sentences, fall back to its timestamps so the
+                # timeline still advances instead of collapsing to empty.
+                if self._timeline_mode == "gga" and not any(
+                    p.timestamp is not None and p.raw_sentence is not None and p.raw_sentence.endswith("GGA")
+                    for p in ds.points
+                ):
+                    for point in ds.points:
+                        if point.timestamp is not None:
+                            times.add(point.timestamp)
+
+            self._aligned_timeline = sorted(times)
+            self._max_points = len(self._aligned_timeline)
+        else:
+            self._aligned_timeline = []
+            self._max_points = max((len(d.points) for d in self.datasets.values()), default=0)
+
+        if self._index >= self._max_points:
+            self._index = max(self._max_points - 1, 0)
