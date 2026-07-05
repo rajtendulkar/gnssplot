@@ -105,6 +105,23 @@ def parse_float_field(raw: str) -> Optional[float]:
         return None
 
 
+def validate_nmea_checksum(line: str) -> bool:
+    if not line.startswith("$") or "*" not in line:
+        return True
+    data_part, checksum_part = line[1:].split("*", 1)
+    if not checksum_part:
+        return False
+    try:
+        expected = int(checksum_part[:2], 16)
+    except ValueError:
+        return False
+
+    value = 0
+    for ch in data_part:
+        value ^= ord(ch)
+    return value == expected
+
+
 def parse_nmea_file(
     file_path: str,
     receiver_name: Optional[str] = None,
@@ -173,12 +190,14 @@ def parse_nmea_file(
 
             parts = line.split(",")
             sentence = parts[0]
+            checksum_ok = validate_nmea_checksum(line)
 
             # GGA: time, lat, ns, lon, ew, fix_quality, sats, hdop, alt
             if sentence.endswith("GGA") and len(parts) >= 10:
                 t = parse_hhmmss(parts[1])
                 lat = parse_lat_lon(parts[2], parts[3])
                 lon = parse_lat_lon(parts[4], parts[5])
+                fix_quality = parse_int_field(parts[6])
 
                 try:
                     sats = int(parts[7]) if parts[7] else None
@@ -202,6 +221,29 @@ def parse_nmea_file(
                 last_hdop = hdop if hdop is not None else last_hdop
                 sat_snapshot, used_ids = current_satellite_snapshot()
 
+                errors: list[str] = []
+                if not checksum_ok:
+                    errors.append("checksum_error")
+                if fix_quality == 0:
+                    errors.append("loss_of_lock")
+                if t is None:
+                    errors.append("invalid_time")
+                if lat is None or lon is None:
+                    errors.append("invalid_position")
+                else:
+                    if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
+                        errors.append("invalid_position")
+                if hdop is not None and hdop < 0:
+                    errors.append("invalid_hdop")
+                if last_vdop is not None and last_vdop < 0:
+                    errors.append("invalid_vdop")
+                if last_pdop is not None and last_pdop < 0:
+                    errors.append("invalid_pdop")
+                if sats is not None and sats < 0:
+                    errors.append("invalid_satellite_count")
+                if alt is not None and not (-10000.0 <= alt <= 100000.0):
+                    errors.append("invalid_altitude")
+
                 dataset.points.append(
                     NMEAPoint(
                         timestamp=dt,
@@ -216,6 +258,8 @@ def parse_nmea_file(
                         speed_knots=last_speed,
                         ground_speed_knots=last_vtg_knots,
                         ground_speed_kmh=last_vtg_kmh,
+                        has_error=bool(errors),
+                        error_reasons=errors,
                         satellites=sat_snapshot,
                         used_satellite_ids=used_ids,
                         raw_sentence=line,
@@ -241,28 +285,47 @@ def parse_nmea_file(
 
                 dt = build_timestamp(t)
 
-                if status == "A":
-                    last_speed = speed if speed is not None else last_speed
-                    sat_snapshot, used_ids = current_satellite_snapshot()
-                    dataset.points.append(
-                        NMEAPoint(
-                            timestamp=dt,
-                            latitude=lat,
-                            longitude=lon,
-                            altitude_m=last_alt,
-                            num_sats=last_sats,
-                            hdop=last_hdop,
-                            vdop=last_vdop,
-                            pdop=last_pdop,
-                            cn0=last_cn0,
-                            speed_knots=speed,
-                            ground_speed_knots=last_vtg_knots,
-                            ground_speed_kmh=last_vtg_kmh,
-                            satellites=sat_snapshot,
-                            used_satellite_ids=used_ids,
-                            raw_sentence=line,
-                        )
+                sat_snapshot, used_ids = current_satellite_snapshot()
+
+                errors: list[str] = []
+                if not checksum_ok:
+                    errors.append("checksum_error")
+                if status != "A":
+                    errors.append("loss_of_lock")
+                if t is None:
+                    errors.append("invalid_time")
+                if lat is None or lon is None:
+                    errors.append("invalid_position")
+                else:
+                    if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
+                        errors.append("invalid_position")
+                if speed is not None and speed < 0:
+                    errors.append("invalid_speed")
+
+                if status == "A" and speed is not None:
+                    last_speed = speed
+
+                dataset.points.append(
+                    NMEAPoint(
+                        timestamp=dt,
+                        latitude=lat,
+                        longitude=lon,
+                        altitude_m=last_alt,
+                        num_sats=last_sats,
+                        hdop=last_hdop,
+                        vdop=last_vdop,
+                        pdop=last_pdop,
+                        cn0=last_cn0,
+                        speed_knots=speed if status == "A" else last_speed,
+                        ground_speed_knots=last_vtg_knots,
+                        ground_speed_kmh=last_vtg_kmh,
+                        has_error=bool(errors),
+                        error_reasons=errors,
+                        satellites=sat_snapshot,
+                        used_satellite_ids=used_ids,
+                        raw_sentence=line,
                     )
+                )
 
             # VTG: course and speed over ground (knots, km/h)
             elif sentence.endswith("VTG") and len(parts) >= 8:

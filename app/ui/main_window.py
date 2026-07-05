@@ -8,7 +8,7 @@ from pathlib import Path
 from statistics import median
 
 from PyQt6.QtCore import QEvent, QTimer, Qt
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent
+from PyQt6.QtGui import QColor, QDragEnterEvent, QDropEvent, QTextCharFormat, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QStatusBar,
     QTabWidget,
+    QTextEdit,
     QToolButton,
     QToolBar,
     QVBoxLayout,
@@ -65,6 +66,8 @@ class MainWindow(QMainWindow):
         self._console_tab_index: int = 2
         self._console_window_by_log: dict[str, tuple[int, int]] = {}
         self._console_selection_key: tuple[str, ...] = ()
+        self._console_error_line_numbers: list[int] = []
+        self._console_error_nav_index: int = -1
 
         self.plot_widget = ComparisonPlotWidget(self)
         self.accuracy_widget = AccuracyWidget(self)
@@ -138,6 +141,10 @@ class MainWindow(QMainWindow):
         self.console_view.setReadOnly(True)
         self.console_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.console_view.setObjectName("consoleView")
+        self.console_error_checkbox = QCheckBox("Highlight Errors")
+        self.console_error_checkbox.setChecked(True)
+        self.console_prev_error_button = QPushButton("Prev Error")
+        self.console_next_error_button = QPushButton("Next Error")
 
         self.log_list = QListWidget()
         self.log_list.setMaximumWidth(280)
@@ -220,6 +227,12 @@ class MainWindow(QMainWindow):
         console_tab = QWidget(self)
         console_layout = QVBoxLayout(console_tab)
         console_layout.setContentsMargins(0, 0, 0, 0)
+        console_head = QHBoxLayout()
+        console_head.addWidget(self.console_error_checkbox)
+        console_head.addWidget(self.console_prev_error_button)
+        console_head.addWidget(self.console_next_error_button)
+        console_head.addStretch(1)
+        console_layout.addLayout(console_head)
         console_layout.addWidget(self.console_view)
 
         map_tab = QWidget(self)
@@ -288,6 +301,9 @@ class MainWindow(QMainWindow):
         self.log_list.itemSelectionChanged.connect(self.on_log_selection_changed)
         self.log_list.customContextMenuRequested.connect(self.show_log_list_context_menu)
         self.tabs.currentChanged.connect(self.on_tab_changed)
+        self.console_error_checkbox.toggled.connect(self._apply_console_error_highlights)
+        self.console_prev_error_button.clicked.connect(self.on_prev_console_error)
+        self.console_next_error_button.clicked.connect(self.on_next_console_error)
 
     def _apply_theme(self, theme: str) -> None:
         if theme == "light":
@@ -518,8 +534,9 @@ class MainWindow(QMainWindow):
 
     def on_timeline_mode_changed(self, _idx: int) -> None:
         mode_data = self.timeline_mode_box.currentData()
-        mode = "aligned" if mode_data == "aligned" else "index"
+        mode = mode_data if mode_data in ("aligned", "gga", "index") else "aligned"
         self.engine.set_timeline_mode(mode)
+        self.plot_widget.set_timeline_mode(mode)
         self._console_window_by_log.clear()
         self._console_selection_key = ()
         self._update_accuracy_panel()
@@ -675,6 +692,7 @@ class MainWindow(QMainWindow):
         if self.log_list.count() > 0 and not self.log_list.selectedItems():
             self.log_list.item(0).setSelected(True)
 
+        self.plot_widget.set_timeline_mode(self.engine.timeline_mode)
         self.apply_plot_selection()
         current_ref = self.accuracy_widget.current_reference()
         self.accuracy_widget.set_reference_options(datasets.keys(), current=current_ref)
@@ -848,6 +866,7 @@ class MainWindow(QMainWindow):
         data_window_size = max(12, visible_line_count - 8)
         anchor_offset = max(1, (data_window_size // 4) - 6)
         lines: list[str] = []
+        error_line_numbers: list[int] = []
         timeline_time = self.engine.playback_time_at(index)
         timeline_time_text = timeline_time.isoformat(sep=" ") if timeline_time else "N/A"
         lines.append(f"Timeline Index: {index}")
@@ -858,6 +877,9 @@ class MainWindow(QMainWindow):
         if not self.engine.datasets:
             lines.append("No logs loaded.")
             self.console_view.setPlainText("\n".join(lines))
+            self._console_error_line_numbers = []
+            self._console_error_nav_index = -1
+            self._apply_console_error_highlights()
             return
 
         selected_names: list[str] = []
@@ -874,6 +896,9 @@ class MainWindow(QMainWindow):
         if not selected_names:
             lines.append("Select a log in 'Loaded Logs' to view console details.")
             self.console_view.setPlainText("\n".join(lines))
+            self._console_error_line_numbers = []
+            self._console_error_nav_index = -1
+            self._apply_console_error_highlights()
             return
 
         for name in selected_names:
@@ -926,11 +951,94 @@ class MainWindow(QMainWindow):
                 marker = "->" if point_idx == current_idx else "  "
                 t_str = point.timestamp.isoformat(sep=" ") if point.timestamp else "N/A"
                 raw = point.raw_sentence if point.raw_sentence else "<none>"
-                lines.append(f"{marker} [{point_idx:06d}] {t_str} | {raw}")
+                if point.has_error:
+                    reason_text = ",".join(point.error_reasons) if point.error_reasons else "parse_error"
+                    line_text = f"{marker} [{point_idx:06d}] {t_str} | {raw}  !!ERROR[{reason_text}]"
+                    error_line_numbers.append(len(lines))
+                    lines.append(line_text)
+                else:
+                    lines.append(f"{marker} [{point_idx:06d}] {t_str} | {raw}")
 
             lines.append("")
 
         self.console_view.setPlainText("\n".join(lines))
+        self._console_error_line_numbers = error_line_numbers
+        self._console_error_nav_index = -1
+        self._apply_console_error_highlights()
+
+    def _apply_console_error_highlights(self) -> None:
+        selections: list[QTextEdit.ExtraSelection] = []
+        if self.console_error_checkbox.isChecked():
+            for line_no in self._console_error_line_numbers:
+                block = self.console_view.document().findBlockByNumber(line_no)
+                if not block.isValid():
+                    continue
+                cursor = QTextCursor(block)
+                cursor.select(QTextCursor.SelectionType.LineUnderCursor)
+                selection = QTextEdit.ExtraSelection()
+                selection.cursor = cursor
+                fmt = QTextCharFormat()
+                fmt.setForeground(QColor("#ef4444"))
+                selection.format = fmt
+                selections.append(selection)
+
+        self.console_view.setExtraSelections(selections)
+        has_errors = bool(self._console_error_line_numbers)
+        self.console_prev_error_button.setEnabled(has_errors)
+        self.console_next_error_button.setEnabled(has_errors)
+
+    def _set_console_cursor_to_line(self, line_no: int) -> None:
+        block = self.console_view.document().findBlockByNumber(line_no)
+        if not block.isValid():
+            return
+        cursor = QTextCursor(block)
+        self.console_view.setTextCursor(cursor)
+        self.console_view.centerCursor()
+
+    def on_prev_console_error(self) -> None:
+        if not self._console_error_line_numbers:
+            return
+
+        current_line = self.console_view.textCursor().blockNumber()
+        if self._console_error_nav_index < 0:
+            candidate = -1
+            for idx, line_no in enumerate(self._console_error_line_numbers):
+                if line_no < current_line:
+                    candidate = idx
+                else:
+                    break
+            if candidate < 0:
+                candidate = len(self._console_error_line_numbers) - 1
+            self._console_error_nav_index = candidate
+        else:
+            self._console_error_nav_index = (
+                self._console_error_nav_index - 1
+            ) % len(self._console_error_line_numbers)
+
+        target_line = self._console_error_line_numbers[self._console_error_nav_index]
+        self._set_console_cursor_to_line(target_line)
+
+    def on_next_console_error(self) -> None:
+        if not self._console_error_line_numbers:
+            return
+
+        current_line = self.console_view.textCursor().blockNumber()
+        if self._console_error_nav_index < 0:
+            candidate = len(self._console_error_line_numbers)
+            for idx, line_no in enumerate(self._console_error_line_numbers):
+                if line_no > current_line:
+                    candidate = idx
+                    break
+            if candidate >= len(self._console_error_line_numbers):
+                candidate = 0
+            self._console_error_nav_index = candidate
+        else:
+            self._console_error_nav_index = (
+                self._console_error_nav_index + 1
+            ) % len(self._console_error_line_numbers)
+
+        target_line = self._console_error_line_numbers[self._console_error_nav_index]
+        self._set_console_cursor_to_line(target_line)
 
     def toggle_map_popout(self) -> None:
         if self._map_is_popped_out:

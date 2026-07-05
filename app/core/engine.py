@@ -158,10 +158,11 @@ class CoreEngine(QObject):
             target_time = self._aligned_timeline[index]
             prefer_suffix = "GGA" if self._timeline_mode == "gga" else None
             sample_idx = dataset.sample_index_at_or_before_time(target_time, prefer_suffix)
-            if sample_idx is None:
-                return None, None
-            return sample_idx, dataset.points[sample_idx]
+            if sample_idx is not None:
+                return sample_idx, dataset.points[sample_idx]
 
+        # Keep all visual panels populated when logs have disjoint absolute dates.
+        # Falling back to the index-based sample preserves per-log continuity.
         point = dataset.sample_at(index)
         if point is None:
             return None, None

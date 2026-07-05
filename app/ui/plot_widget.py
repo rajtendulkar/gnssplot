@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Literal
 
 import pyqtgraph as pg
 from PyQt6.QtWidgets import QComboBox, QGridLayout, QHBoxLayout, QLabel, QToolButton, QVBoxLayout, QWidget
@@ -57,6 +57,8 @@ class ComparisonPlotWidget(QWidget):
         self._maximized_index: int | None = None
         self._cursor_lines: list[pg.InfiniteLine] = []
         self._datasets: Dict[str, NMEADataset] = {}
+        self._timeline_mode: Literal["index", "aligned", "gga"] = "aligned"
+        self._aligned_anchor_ts = datetime(2000, 1, 1).timestamp()
 
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(0, 0, 0, 0)
@@ -166,6 +168,7 @@ class ComparisonPlotWidget(QWidget):
 
             plot_item.clear()
             plot_item.setTitle(metric_label, color=self._title_color, size="12pt")
+            plot_item.setLabel("bottom", "Time")
             if plot_item.legend is not None:
                 plot_item.legend.scene().removeItem(plot_item.legend)
                 plot_item.legend = None
@@ -176,7 +179,7 @@ class ComparisonPlotWidget(QWidget):
             self._cursor_lines.append(cursor)
 
             for dataset_index, (receiver, dataset) in enumerate(self._datasets.items()):
-                x_vals, y_vals = dataset.metric_series(metric)
+                x_vals, y_vals = self._metric_series_for_plot(dataset, metric)
                 if not x_vals:
                     continue
                 pen = pg.mkPen(color=self.COLORS[dataset_index % len(self.COLORS)], width=2)
@@ -186,6 +189,13 @@ class ComparisonPlotWidget(QWidget):
 
     def update_datasets(self, datasets: Dict[str, NMEADataset]) -> None:
         self._datasets = datasets
+        self._refresh_all_plots()
+        self.reset_all_views()
+
+    def set_timeline_mode(self, mode: Literal["index", "aligned", "gga"]) -> None:
+        if mode not in ("index", "aligned", "gga"):
+            return
+        self._timeline_mode = mode
         self._refresh_all_plots()
         self.reset_all_views()
 
@@ -235,7 +245,7 @@ class ComparisonPlotWidget(QWidget):
             plot.addLegend(offset=(10, 10))
 
             for dataset_index, (receiver, dataset) in enumerate(datasets.items()):
-                x_vals, y_vals = dataset.metric_series(metric)
+                x_vals, y_vals = self._metric_series_for_plot(dataset, metric)
                 if not x_vals:
                     continue
                 pen = pg.mkPen(color=self.COLORS[dataset_index % len(self.COLORS)], width=2)
@@ -273,7 +283,7 @@ class ComparisonPlotWidget(QWidget):
         y_values: list[float] = []
 
         for dataset in datasets.values():
-            xs, ys = dataset.metric_series(metric)
+            xs, ys = self._metric_series_for_plot(dataset, metric)
             x_values.extend(xs)
             y_values.extend(ys)
 
@@ -299,7 +309,7 @@ class ComparisonPlotWidget(QWidget):
         y_values: list[float] = []
 
         for dataset in self._datasets.values():
-            xs, ys = dataset.metric_series(metric)
+            xs, ys = self._metric_series_for_plot(dataset, metric)
             x_values.extend(xs)
             y_values.extend(ys)
 
@@ -335,7 +345,7 @@ class ComparisonPlotWidget(QWidget):
     def set_playback_time(self, timestamp: datetime | None) -> None:
         if timestamp is None:
             return
-        cursor_x = timestamp.timestamp()
+        cursor_x = self._timestamp_for_timeline_mode(timestamp)
         for cursor in self._cursor_lines:
             cursor.setValue(cursor_x)
 
@@ -434,3 +444,54 @@ class ComparisonPlotWidget(QWidget):
             plot.getAxis("bottom").setTextPen(pg.mkPen(self._axis_text_pen))
 
         self._refresh_all_plots()
+
+    def _timestamp_for_timeline_mode(self, timestamp: datetime) -> float:
+        if self._timeline_mode in {"aligned", "gga"}:
+            seconds_of_day = (
+                timestamp.hour * 3600
+                + timestamp.minute * 60
+                + timestamp.second
+                + timestamp.microsecond / 1_000_000
+            )
+            return self._aligned_anchor_ts + seconds_of_day
+        return timestamp.timestamp()
+
+    def _metric_series_for_plot(self, dataset: NMEADataset, metric: str) -> tuple[list[float], list[float]]:
+        if self._timeline_mode == "index":
+            return dataset.metric_series(metric)
+        return self._metric_series_time_aligned(dataset, metric)
+
+    def _metric_series_time_aligned(self, dataset: NMEADataset, metric: str) -> tuple[list[float], list[float]]:
+        x_vals: list[float] = []
+        y_vals: list[float] = []
+        day_offset_seconds = 0.0
+        last_seconds_of_day: float | None = None
+
+        for point in dataset.points:
+            if point.has_error or point.timestamp is None:
+                continue
+
+            if self._timeline_mode == "gga":
+                raw_sentence = point.raw_sentence or ""
+                sentence_id = raw_sentence.split(",", 1)[0]
+                if not sentence_id.endswith("GGA"):
+                    continue
+
+            value = getattr(point, metric)
+            if value is None:
+                continue
+
+            seconds_of_day = (
+                point.timestamp.hour * 3600
+                + point.timestamp.minute * 60
+                + point.timestamp.second
+                + point.timestamp.microsecond / 1_000_000
+            )
+            if last_seconds_of_day is not None and seconds_of_day < last_seconds_of_day:
+                day_offset_seconds += 86400.0
+            last_seconds_of_day = seconds_of_day
+
+            x_vals.append(self._aligned_anchor_ts + day_offset_seconds + seconds_of_day)
+            y_vals.append(float(value))
+
+        return x_vals, y_vals

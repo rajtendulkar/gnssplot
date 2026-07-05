@@ -29,6 +29,8 @@ class NMEAPoint:
     speed_knots: Optional[float]
     ground_speed_knots: Optional[float]
     ground_speed_kmh: Optional[float]
+    has_error: bool = False
+    error_reasons: List[str] = field(default_factory=list)
     satellites: List[SatelliteInfo] = field(default_factory=list)
     used_satellite_ids: List[int] = field(default_factory=list)
     raw_sentence: Optional[str] = None
@@ -44,6 +46,8 @@ class NMEADataset:
         x_vals: list[float] = []
         y_vals: list[float] = []
         for point in self.points:
+            if point.has_error:
+                continue
             if point.timestamp is None:
                 continue
             value = getattr(point, metric)
