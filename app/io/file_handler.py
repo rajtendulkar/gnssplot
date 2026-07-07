@@ -11,6 +11,7 @@ from typing import Iterable
 from PyQt6.QtWidgets import QFileDialog, QWidget
 
 from app.core.models import NMEADataset
+from app.io.kml_generator import generate_kml_from_dataset, generate_kml_from_nmea_file
 
 
 FULL_PARAMETER_FIELDS = [
@@ -137,7 +138,8 @@ def export_report_bundle(
     timeline_mode: str,
     plot_image_paths: list[tuple[str, str]] | None = None,
 ) -> None:
-    summary = summary_rows(datasets)
+    datasets_list = list(datasets)
+    summary = summary_rows(datasets_list)
 
     with tempfile.TemporaryDirectory(prefix="gnss_report_") as tmpdir:
         temp_dir = Path(tmpdir)
@@ -146,13 +148,35 @@ def export_report_bundle(
         report_path = temp_dir / "report.json"
         plot_csv_paths: list[tuple[str, Path]] = []
 
-        for dataset in datasets:
+        kml_input_paths: list[tuple[str, Path]] = []
+        kml_output_paths: list[tuple[str, Path]] = []
+
+        for dataset in datasets_list:
             csv_path = temp_dir / f"{dataset.receiver_name}_full_parameters.csv"
             with open(csv_path, "w", newline="", encoding="utf-8") as fp:
                 writer = csv.DictWriter(fp, fieldnames=FULL_PARAMETER_FIELDS)
                 writer.writeheader()
                 writer.writerows(full_parameter_rows(dataset))
             plot_csv_paths.append((dataset.receiver_name, csv_path))
+
+            input_kml_path = temp_dir / f"{dataset.receiver_name}_input.kml"
+            output_kml_path = temp_dir / f"{dataset.receiver_name}_output.kml"
+
+            if dataset.source_path and Path(dataset.source_path).exists():
+                generate_kml_from_nmea_file(
+                    dataset.source_path,
+                    str(input_kml_path),
+                    doc_name=f"{dataset.receiver_name} input log",
+                )
+                kml_input_paths.append((dataset.receiver_name, input_kml_path))
+
+            generate_kml_from_dataset(
+                dataset,
+                str(output_kml_path),
+                doc_name=f"{dataset.receiver_name} output log",
+                skip_errors=True,
+            )
+            kml_output_paths.append((dataset.receiver_name, output_kml_path))
 
         summary_fields = [
             "receiver",
@@ -187,6 +211,8 @@ def export_report_bundle(
                 "accuracy": "accuracy.csv",
                 "parameters": [f"parameters/{name}_full_parameters.csv" for name, _ in plot_csv_paths],
                 "plots": [f"plots/{name}" for name, _ in (plot_image_paths or [])],
+                "kml_input": [f"kml/input/{name}_input.kml" for name, _ in kml_input_paths],
+                "kml_output": [f"kml/output/{name}_output.kml" for name, _ in kml_output_paths],
             },
         }
         with open(report_path, "w", encoding="utf-8") as fp:
@@ -198,6 +224,10 @@ def export_report_bundle(
             zf.write(report_path, arcname="report.json")
             for receiver_name, csv_path in plot_csv_paths:
                 zf.write(csv_path, arcname=f"parameters/{receiver_name}_full_parameters.csv")
+            for receiver_name, input_kml_path in kml_input_paths:
+                zf.write(input_kml_path, arcname=f"kml/input/{receiver_name}_input.kml")
+            for receiver_name, output_kml_path in kml_output_paths:
+                zf.write(output_kml_path, arcname=f"kml/output/{receiver_name}_output.kml")
             if plot_image_paths:
                 for rel_name, image_path in plot_image_paths:
                     zf.write(image_path, arcname=f"plots/{rel_name}")
