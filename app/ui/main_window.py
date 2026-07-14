@@ -44,6 +44,7 @@ from app.io.file_handler import (
     receiver_name_from_path,
 )
 from app.parser.parser_thread import NMEAParserThread
+from app.parser.serial_reader_thread import SerialReaderThread
 from app.ui.accuracy_widget import AccuracyWidget
 from app.ui.map_widget import MapWidget
 from app.ui.plot_widget import ComparisonPlotWidget
@@ -58,6 +59,8 @@ class MainWindow(QMainWindow):
 
         self.engine = CoreEngine(self)
         self.parse_threads: dict[str, NMEAParserThread] = {}
+        self.serial_thread: SerialReaderThread | None = None
+        self.serial_receiver_name: str | None = None
         self.parse_progress: dict[str, int] = {}
         self.log_visibility: dict[str, bool] = {}
         self._last_map_index: int | None = None
@@ -129,6 +132,14 @@ class MainWindow(QMainWindow):
         self.map_dots_checkbox = QCheckBox("Show Dots")
         self.map_dots_checkbox.setChecked(False)
 
+        self.serial_port_box = QComboBox()
+        self.serial_port_box.setMinimumWidth(130)
+        self.serial_baud_box = QComboBox()
+        self.serial_baud_box.addItems(["4800", "9600", "19200", "38400", "57600", "115200", "230400"])
+        self.serial_baud_box.setCurrentText("115200")
+        self.serial_refresh_button = QPushButton("Refresh Ports")
+        self.serial_connect_button = QPushButton("Connect UART")
+
         self.time_label = QLabel("Time: N/A")
         self.index_label = QLabel("Index: 0/0")
 
@@ -160,6 +171,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._apply_theme("dark")
         self._wire_signals()
+        self.refresh_serial_ports()
         self._update_playback_buttons(False)
         self.setAcceptDrops(True)
 
@@ -196,6 +208,13 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(QLabel("Theme:"))
         toolbar.addWidget(self.theme_box)
         toolbar.addWidget(self.map_dots_checkbox)
+
+        toolbar.addSeparator()
+        toolbar.addWidget(QLabel("UART:"))
+        toolbar.addWidget(self.serial_port_box)
+        toolbar.addWidget(self.serial_baud_box)
+        toolbar.addWidget(self.serial_refresh_button)
+        toolbar.addWidget(self.serial_connect_button)
 
         spacer = QWidget(self)
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -292,6 +311,8 @@ class MainWindow(QMainWindow):
         self.timeline_mode_box.currentIndexChanged.connect(self.on_timeline_mode_changed)
         self.theme_box.currentTextChanged.connect(self.on_theme_changed)
         self.map_dots_checkbox.toggled.connect(self.on_map_dots_toggled)
+        self.serial_refresh_button.clicked.connect(self.refresh_serial_ports)
+        self.serial_connect_button.clicked.connect(self.on_uart_connect_toggle)
         self.slider.valueChanged.connect(self.engine.set_index)
 
         self.engine.datasets_changed.connect(self.on_datasets_changed)
@@ -590,6 +611,8 @@ class MainWindow(QMainWindow):
                 names_to_remove.append(name)
 
         for name in names_to_remove:
+            if self.serial_receiver_name == name:
+                self._stop_serial_reader()
             thread = self.parse_threads.pop(name, None)
             if thread is not None and thread.isRunning():
                 thread.requestInterruption()
@@ -606,6 +629,8 @@ class MainWindow(QMainWindow):
         self._update_console_for_index(self.engine.index)
 
     def clear_logs(self) -> None:
+        self._stop_serial_reader()
+
         for name, thread in list(self.parse_threads.items()):
             if thread.isRunning():
                 thread.requestInterruption()
@@ -1283,6 +1308,91 @@ class MainWindow(QMainWindow):
         self._add_log_paths(paths)
         self.statusBar().showMessage(f"Dropped {len(paths)} file(s). Parsing started...", 4000)
         event.acceptProposedAction()
+
+    def refresh_serial_ports(self) -> None:
+        current_port = self.serial_port_box.currentText().strip()
+        ports: list[str] = []
+
+        try:
+            import serial.tools.list_ports
+
+            ports = [p.device for p in serial.tools.list_ports.comports()]
+        except Exception:
+            ports = []
+
+        self.serial_port_box.blockSignals(True)
+        self.serial_port_box.clear()
+        if ports:
+            self.serial_port_box.addItems(ports)
+            if current_port and current_port in ports:
+                self.serial_port_box.setCurrentText(current_port)
+        else:
+            self.serial_port_box.addItem("No ports")
+        self.serial_port_box.blockSignals(False)
+
+    def on_uart_connect_toggle(self) -> None:
+        if self.serial_thread is not None and self.serial_thread.isRunning():
+            self._stop_serial_reader()
+            return
+
+        port_name = self.serial_port_box.currentText().strip()
+        if not port_name or port_name == "No ports":
+            QMessageBox.warning(self, "UART", "No serial port selected.")
+            return
+
+        try:
+            baud_rate = int(self.serial_baud_box.currentText())
+        except ValueError:
+            QMessageBox.warning(self, "UART", "Invalid baud rate.")
+            return
+
+        receiver = self._unique_receiver_name(f"uart_{port_name.replace('/', '_')}")
+        self.serial_receiver_name = receiver
+        self.log_visibility[receiver] = True
+        self.engine.add_dataset(NMEADataset(receiver_name=receiver, source_path=f"serial://{port_name}"))
+
+        thread = SerialReaderThread(
+            port_name=port_name,
+            baud_rate=baud_rate,
+            receiver_name=receiver,
+            parent=self,
+        )
+        thread.connected.connect(self.on_uart_connected)
+        thread.disconnected.connect(self.on_uart_disconnected)
+        thread.failed.connect(self.on_uart_failed)
+        thread.points_received.connect(self.on_uart_points_received)
+        self.serial_thread = thread
+
+        self.serial_connect_button.setText("Disconnect UART")
+        self.statusBar().showMessage(f"Connecting UART {port_name} @ {baud_rate}...", 3000)
+        thread.start()
+
+    def _stop_serial_reader(self) -> None:
+        thread = self.serial_thread
+        self.serial_thread = None
+        self.serial_connect_button.setText("Connect UART")
+
+        if thread is not None and thread.isRunning():
+            thread.requestInterruption()
+            thread.wait(1500)
+
+    def on_uart_connected(self, receiver: str) -> None:
+        self.statusBar().showMessage(f"UART connected: {receiver}", 3000)
+
+    def on_uart_disconnected(self, receiver: str) -> None:
+        if self.serial_receiver_name == receiver:
+            self.serial_receiver_name = None
+        self.serial_thread = None
+        self.serial_connect_button.setText("Connect UART")
+        self.statusBar().showMessage(f"UART disconnected: {receiver}", 3000)
+
+    def on_uart_failed(self, error_text: str) -> None:
+        QMessageBox.critical(self, "UART error", error_text)
+
+    def on_uart_points_received(self, receiver: str, points: object) -> None:
+        if not isinstance(points, list) or not points:
+            return
+        self.engine.append_points(receiver, points)
 
 
 def run_app() -> None:

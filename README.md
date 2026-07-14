@@ -12,6 +12,7 @@ A modular desktop tool to compare GNSS receiver performance from NMEA logs.
 - Playback timeline across loaded logs.
 - OpenStreetMap pop-out window (`QWebEngineView` + Leaflet) with live receiver marker updates.
 - Optional CSV summary export.
+- Live UART ingest from serial GNSS receivers (runtime NMEA streaming).
 
 ## Project Structure
 
@@ -51,3 +52,4 @@ python main.py
 
 - The map widget uses Leaflet with OpenStreetMap tiles in an embedded HTML page.
 - Parser currently extracts common fields from GGA and RMC sentences.
+- UART mode requires `pyserial` and supports selecting port and baud in the top toolbar.

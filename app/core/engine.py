@@ -66,6 +66,14 @@ class CoreEngine(QObject):
         self.datasets_changed.emit(dict(self.datasets))
         self._emit_playback()
 
+    def append_points(self, receiver_name: str, points: list[NMEAPoint]) -> None:
+        if receiver_name not in self.datasets or not points:
+            return
+        self.datasets[receiver_name].points.extend(points)
+        self._recompute_timeline()
+        self.datasets_changed.emit(dict(self.datasets))
+        self._emit_playback()
+
     def set_timeline_mode(self, mode: Literal["index", "aligned", "gga"]) -> None:
         if mode == self._timeline_mode:
             return
