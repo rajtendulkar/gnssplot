@@ -13,6 +13,7 @@ A modular desktop tool to compare GNSS receiver performance from NMEA logs.
 - OpenStreetMap pop-out window (`QWebEngineView` + Leaflet) with live receiver marker updates.
 - Optional CSV summary export.
 - Live UART ingest from serial GNSS receivers (runtime NMEA streaming).
+- Save and restore analysis sessions (loaded files + UI playback/view state).
 
 ## Project Structure
 

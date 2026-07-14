@@ -67,6 +67,40 @@ def choose_report_bundle_path(parent: QWidget) -> str:
     return path
 
 
+def choose_session_save_path(parent: QWidget) -> str:
+    path, _ = QFileDialog.getSaveFileName(
+        parent,
+        "Save Session",
+        "gnss_session.json",
+        "Session Files (*.json)",
+    )
+    return path
+
+
+def choose_session_load_path(parent: QWidget) -> str:
+    path, _ = QFileDialog.getOpenFileName(
+        parent,
+        "Open Session",
+        "",
+        "Session Files (*.json)",
+    )
+    return path
+
+
+def save_session_json(session_path: str, payload: dict) -> None:
+    with open(session_path, "w", encoding="utf-8") as fp:
+        json.dump(payload, fp, indent=2)
+
+
+def load_session_json(session_path: str) -> dict:
+    with open(session_path, "r", encoding="utf-8") as fp:
+        data = json.load(fp)
+
+    if not isinstance(data, dict):
+        raise ValueError("Invalid session file format")
+    return data
+
+
 def summary_rows(datasets: Iterable[NMEADataset]) -> list[dict[str, float | int | str]]:
     return [d.summary() for d in datasets]
 

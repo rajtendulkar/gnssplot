@@ -40,8 +40,12 @@ from app.core.models import NMEADataset, NMEAPoint
 from app.io.file_handler import (
     choose_nmea_files,
     choose_report_bundle_path,
+    choose_session_load_path,
+    choose_session_save_path,
     export_report_bundle as write_report_bundle,
+    load_session_json,
     receiver_name_from_path,
+    save_session_json,
 )
 from app.parser.parser_thread import NMEAParserThread
 from app.parser.serial_reader_thread import SerialReaderThread
@@ -71,6 +75,7 @@ class MainWindow(QMainWindow):
         self._console_selection_key: tuple[str, ...] = ()
         self._console_error_line_numbers: list[int] = []
         self._console_error_nav_index: int = -1
+        self._pending_restore_state: dict | None = None
 
         self.plot_widget = ComparisonPlotWidget(self)
         self.accuracy_widget = AccuracyWidget(self)
@@ -110,6 +115,8 @@ class MainWindow(QMainWindow):
         self.step_button.setEnabled(False)
         self.reset_plots_button = QPushButton("Reset Plots")
         self.export_button = QPushButton("Export Report Bundle")
+        self.save_session_button = QPushButton("Save Session")
+        self.restore_session_button = QPushButton("Restore Session")
         self.map_tab_popout_button = QPushButton("Pop Out")
         self.map_fit_button = QPushButton("Fit Visible")
         self.map_follow_checkbox = QCheckBox("Follow Playback")
@@ -197,6 +204,8 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.step_button)
         toolbar.addWidget(self.reset_plots_button)
         toolbar.addWidget(self.export_button)
+        toolbar.addWidget(self.save_session_button)
+        toolbar.addWidget(self.restore_session_button)
 
         toolbar.addSeparator()
         toolbar.addWidget(QLabel("Playback:"))
@@ -302,6 +311,8 @@ class MainWindow(QMainWindow):
         self.step_button.clicked.connect(self.on_step_clicked)
         self.reset_plots_button.clicked.connect(self.plot_widget.reset_all_views)
         self.export_button.clicked.connect(self.export_summary)
+        self.save_session_button.clicked.connect(self.save_session)
+        self.restore_session_button.clicked.connect(self.restore_session)
         self.map_tab_popout_button.clicked.connect(self.toggle_map_popout)
         self.map_fit_button.clicked.connect(self.on_map_fit_visible)
         self.map_follow_checkbox.toggled.connect(self.on_map_follow_toggled)
@@ -583,9 +594,14 @@ class MainWindow(QMainWindow):
             thread.progress.connect(self.on_parse_progress)
             thread.parsed.connect(self.on_parse_done)
             thread.failed.connect(self.on_parse_failed)
-            thread.finished.connect(lambda r=receiver: self.parse_threads.pop(r, None))
+            thread.finished.connect(lambda r=receiver: self.on_parse_thread_finished(r))
             self.parse_threads[receiver] = thread
             thread.start()
+
+    def on_parse_thread_finished(self, receiver: str) -> None:
+        self.parse_threads.pop(receiver, None)
+        if self._pending_restore_state is not None and not self.parse_threads:
+            self._apply_restored_ui_state()
 
     def _unique_receiver_name(self, base_name: str) -> str:
         if base_name not in self.engine.datasets and base_name not in self.parse_threads:
@@ -1183,6 +1199,203 @@ class MainWindow(QMainWindow):
                 plot_image_paths=plot_image_paths,
             )
         self.statusBar().showMessage(f"Report bundle exported: {Path(bundle_path).name}", 4000)
+
+    def _build_session_payload(self) -> dict:
+        datasets_info: list[dict[str, object]] = []
+        for name, ds in self.engine.datasets.items():
+            datasets_info.append(
+                {
+                    "receiver": name,
+                    "source_path": ds.source_path,
+                    "visible": bool(self.log_visibility.get(name, True)),
+                }
+            )
+
+        selected_receivers: list[str] = []
+        for item in self.log_list.selectedItems():
+            name = item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(name, str):
+                selected_receivers.append(name)
+
+        return {
+            "version": 1,
+            "timeline_mode": self.engine.timeline_mode,
+            "speed": self.speed_box.currentText(),
+            "theme": self.theme_box.currentText(),
+            "map_show_dots": self.map_dots_checkbox.isChecked(),
+            "map_follow_playback": self.map_follow_checkbox.isChecked(),
+            "reference_receiver": self.accuracy_widget.current_reference(),
+            "playback_index": self.engine.index,
+            "selected_receivers": selected_receivers,
+            "datasets": datasets_info,
+        }
+
+    def save_session(self) -> None:
+        if not self.engine.datasets:
+            QMessageBox.information(self, "Save Session", "No logs loaded to save.")
+            return
+
+        session_path = choose_session_save_path(self)
+        if not session_path:
+            return
+
+        try:
+            save_session_json(session_path, self._build_session_payload())
+        except Exception as exc:
+            QMessageBox.critical(self, "Save Session", f"Failed to save session:\n{exc}")
+            return
+
+        self.statusBar().showMessage(f"Session saved: {Path(session_path).name}", 4000)
+
+    def restore_session(self) -> None:
+        session_path = choose_session_load_path(self)
+        if not session_path:
+            return
+
+        try:
+            payload = load_session_json(session_path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Restore Session", f"Failed to load session:\n{exc}")
+            return
+
+        datasets = payload.get("datasets")
+        if not isinstance(datasets, list):
+            QMessageBox.critical(self, "Restore Session", "Invalid session content: missing datasets list.")
+            return
+
+        file_paths: list[str] = []
+        missing_paths: list[str] = []
+        for item in datasets:
+            if not isinstance(item, dict):
+                continue
+            source_path = item.get("source_path")
+            if not isinstance(source_path, str) or not source_path:
+                continue
+            if source_path.startswith("serial://"):
+                continue
+            if Path(source_path).exists():
+                file_paths.append(source_path)
+            else:
+                missing_paths.append(source_path)
+
+        self._pending_restore_state = payload
+        self.clear_logs()
+
+        if file_paths:
+            self._add_log_paths(file_paths)
+            self.statusBar().showMessage(
+                f"Restoring session from {Path(session_path).name} ({len(file_paths)} log files)...",
+                5000,
+            )
+        else:
+            self._apply_restored_ui_state()
+
+        if missing_paths:
+            missing_preview = "\n".join(missing_paths[:8])
+            if len(missing_paths) > 8:
+                missing_preview += f"\n... and {len(missing_paths) - 8} more"
+            QMessageBox.warning(
+                self,
+                "Restore Session",
+                "Some files from the session were not found and were skipped:\n" + missing_preview,
+            )
+
+    def _apply_restored_ui_state(self) -> None:
+        payload = self._pending_restore_state
+        self._pending_restore_state = None
+        if payload is None:
+            return
+
+        timeline_mode = payload.get("timeline_mode")
+        if timeline_mode in {"aligned", "gga", "index"}:
+            idx = self.timeline_mode_box.findData(timeline_mode)
+            if idx >= 0:
+                self.timeline_mode_box.setCurrentIndex(idx)
+
+        speed = payload.get("speed")
+        if isinstance(speed, str) and self.speed_box.findText(speed) >= 0:
+            self.speed_box.setCurrentText(speed)
+
+        theme = payload.get("theme")
+        if isinstance(theme, str) and self.theme_box.findText(theme) >= 0:
+            self.theme_box.setCurrentText(theme)
+
+        map_show_dots = payload.get("map_show_dots")
+        if isinstance(map_show_dots, bool):
+            self.map_dots_checkbox.setChecked(map_show_dots)
+
+        map_follow = payload.get("map_follow_playback")
+        if isinstance(map_follow, bool):
+            self.map_follow_checkbox.setChecked(map_follow)
+
+        visibility_by_source: dict[str, bool] = {}
+        source_by_saved_receiver: dict[str, str] = {}
+        selected_saved_receivers = payload.get("selected_receivers", [])
+        for item in payload.get("datasets", []):
+            if not isinstance(item, dict):
+                continue
+            source_path = item.get("source_path")
+            visible = item.get("visible")
+            saved_receiver = item.get("receiver")
+            if isinstance(source_path, str) and isinstance(visible, bool):
+                visibility_by_source[source_path] = visible
+            if isinstance(saved_receiver, str) and isinstance(source_path, str):
+                source_by_saved_receiver[saved_receiver] = source_path
+
+        if visibility_by_source:
+            self.log_list.blockSignals(True)
+            for row in range(self.log_list.count()):
+                item = self.log_list.item(row)
+                name = item.data(Qt.ItemDataRole.UserRole)
+                if not isinstance(name, str):
+                    continue
+                ds = self.engine.datasets.get(name)
+                if ds is None:
+                    continue
+                source_path = ds.source_path
+                if source_path in visibility_by_source:
+                    is_visible = visibility_by_source[source_path]
+                    item.setCheckState(Qt.CheckState.Checked if is_visible else Qt.CheckState.Unchecked)
+                    self.log_visibility[name] = is_visible
+            self.log_list.blockSignals(False)
+            self.apply_plot_selection()
+
+        selected_sources: set[str] = set()
+        if isinstance(selected_saved_receivers, list):
+            for receiver in selected_saved_receivers:
+                if isinstance(receiver, str) and receiver in source_by_saved_receiver:
+                    selected_sources.add(source_by_saved_receiver[receiver])
+
+        self.log_list.blockSignals(True)
+        self.log_list.clearSelection()
+        if selected_sources:
+            for row in range(self.log_list.count()):
+                item = self.log_list.item(row)
+                name = item.data(Qt.ItemDataRole.UserRole)
+                ds = self.engine.datasets.get(name) if isinstance(name, str) else None
+                if ds is not None and ds.source_path in selected_sources:
+                    item.setSelected(True)
+        if not self.log_list.selectedItems() and self.log_list.count() > 0:
+            self.log_list.item(0).setSelected(True)
+        self.log_list.blockSignals(False)
+        self.on_log_selection_changed()
+
+        reference = payload.get("reference_receiver")
+        source_for_reference = source_by_saved_receiver.get(reference) if isinstance(reference, str) else None
+        if source_for_reference is not None:
+            for ds in self.engine.datasets.values():
+                if ds.source_path == source_for_reference:
+                    self.accuracy_widget.set_reference_options(
+                        self.engine.datasets.keys(),
+                        current=ds.receiver_name,
+                    )
+                    break
+
+        playback_index = payload.get("playback_index")
+        if isinstance(playback_index, int):
+            self.engine.set_index(playback_index)
+
+        self.statusBar().showMessage("Session restored.", 4000)
 
     def _update_accuracy_panel(self) -> None:
         reference = self.accuracy_widget.current_reference()
