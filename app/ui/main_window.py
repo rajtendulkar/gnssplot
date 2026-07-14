@@ -52,6 +52,7 @@ from app.parser.serial_reader_thread import SerialReaderThread
 from app.ui.accuracy_widget import AccuracyWidget
 from app.ui.map_widget import MapWidget
 from app.ui.plot_widget import ComparisonPlotWidget
+from app.ui.satellite_cn0_widget import SatelliteCN0Widget
 from app.ui.satellite_widget import SatelliteViewWidget
 
 
@@ -80,6 +81,7 @@ class MainWindow(QMainWindow):
         self.plot_widget = ComparisonPlotWidget(self)
         self.accuracy_widget = AccuracyWidget(self)
         self.satellite_widget = SatelliteViewWidget(self)
+        self.satellite_cn0_widget = SatelliteCN0Widget(self)
         self.map_popout_window = QMainWindow(self)
         self.map_popout_window.setWindowTitle("GNSS Playback Map")
         self.map_popout_window.resize(950, 650)
@@ -311,6 +313,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(plots_tab, "Plots")
         self.tabs.addTab(self.accuracy_widget, "Accuracy")
         self.tabs.addTab(self.satellite_widget, "Satellite")
+        self.tabs.addTab(self.satellite_cn0_widget, "Satellite CN0")
         self._console_tab_index = self.tabs.addTab(console_tab, "Console")
         self.tabs.addTab(map_tab, "Map")
         self.tabs.setCurrentIndex(0)
@@ -674,6 +677,7 @@ class MainWindow(QMainWindow):
         self.plot_widget.set_theme(theme)
         self.accuracy_widget.set_theme(theme)
         self.satellite_widget.set_theme(theme)
+        self.satellite_cn0_widget.set_theme(theme)
 
     def on_theme_changed(self, theme_text: str) -> None:
         theme = "light" if theme_text.lower() == "light" else "dark"
@@ -860,6 +864,7 @@ class MainWindow(QMainWindow):
         self._update_console_for_index(self.engine.index)
         self._update_accuracy_panel()
         self._update_satellite_panel(self.engine.index)
+        self._update_satellite_cn0_panel()
         QTimer.singleShot(0, self.plot_widget.reset_all_views)
         self._sync_step_button()
 
@@ -876,6 +881,7 @@ class MainWindow(QMainWindow):
         self._last_map_index = self.engine.index
         self._update_console_for_index(self.engine.index)
         self._update_accuracy_panel()
+        self._update_satellite_cn0_panel()
         QTimer.singleShot(0, self.plot_widget.reset_all_views)
 
     def on_log_selection_changed(self) -> None:
@@ -883,6 +889,7 @@ class MainWindow(QMainWindow):
         self._console_selection_key = ()
         self._update_console_for_index(self.engine.index)
         self._update_satellite_panel(self.engine.index)
+        self._update_satellite_cn0_panel()
 
     def on_tab_changed(self, current_idx: int) -> None:
         if current_idx != self._console_tab_index:
@@ -910,7 +917,9 @@ class MainWindow(QMainWindow):
         self.slider.setValue(index)
         self.slider.blockSignals(False)
 
-        self.plot_widget.set_playback_time(self._plot_cursor_time_at(index))
+        playback_time = self._plot_cursor_time_at(index)
+        self.plot_widget.set_playback_time(playback_time)
+        self.satellite_cn0_widget.set_playback_time(playback_time)
         self._sync_step_button()
         self._update_satellite_panel(index)
         if self.tabs.currentIndex() == self._console_tab_index:
@@ -968,6 +977,15 @@ class MainWindow(QMainWindow):
         all_names = list(self.engine.datasets.keys())
         return all_names[:1]
 
+    def _cn0_receivers_for_view(self) -> list[str]:
+        visible_names = [
+            name for name in self.engine.datasets.keys() if self.log_visibility.get(name, True)
+        ]
+        if visible_names:
+            return visible_names
+
+        return list(self.engine.datasets.keys())
+
     def _update_satellite_panel(self, index: int) -> None:
         receivers = self._satellite_receivers_for_view()
         if not receivers:
@@ -983,6 +1001,12 @@ class MainWindow(QMainWindow):
             entries.append((receiver, point))
 
         self.satellite_widget.set_view_data(entries)
+
+    def _update_satellite_cn0_panel(self) -> None:
+        self.satellite_cn0_widget.set_view_data(
+            dict(self.engine.datasets),
+            self._cn0_receivers_for_view(),
+        )
 
     def _plot_cursor_time_at(self, index: int):
         selected_datasets = [
@@ -1304,6 +1328,22 @@ class MainWindow(QMainWindow):
                         receiver_name,
                     )
                 )
+
+            cn0_receivers = self._cn0_receivers_for_view()
+            cn0_datasets = {
+                name: ds for name, ds in self.engine.datasets.items() if name in cn0_receivers
+            }
+            if not cn0_datasets:
+                cn0_datasets = selected_datasets
+
+            plot_image_paths.extend(
+                self.satellite_cn0_widget.export_metric_gallery(
+                    cn0_datasets,
+                    f"{tmpdir}/satellite_cn0",
+                    "satellite_cn0",
+                    selected_receivers=list(cn0_datasets.keys()),
+                )
+            )
 
             write_report_bundle(
                 bundle_path,
