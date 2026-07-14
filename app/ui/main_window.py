@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
-from math import asin, cos, radians, sin, sqrt
+from math import asin, atan2, cos, degrees, radians, sin, sqrt
 from pathlib import Path
 from statistics import median
 
@@ -77,6 +77,8 @@ class MainWindow(QMainWindow):
         self._console_error_line_numbers: list[int] = []
         self._console_error_nav_index: int = -1
         self._pending_restore_state: dict | None = None
+        self._full_paths_update_scheduled = False
+        self._full_paths_refresh_delay_ms = 120
 
         self.plot_widget = ComparisonPlotWidget(self)
         self.accuracy_widget = AccuracyWidget(self)
@@ -727,6 +729,8 @@ class MainWindow(QMainWindow):
 
     def on_parse_thread_finished(self, receiver: str) -> None:
         self.parse_threads.pop(receiver, None)
+        if not self.parse_threads:
+            self._schedule_full_paths_refresh(delay_ms=0)
         if self._pending_restore_state is not None and not self.parse_threads:
             self._apply_restored_ui_state()
 
@@ -842,6 +846,9 @@ class MainWindow(QMainWindow):
         self._console_selection_key = ()
         self.map_widget.reset_tracks()
         self.map_widget.set_show_dots(self.map_dots_checkbox.isChecked())
+        self._schedule_full_paths_refresh(
+            delay_ms=self._full_paths_refresh_delay_ms if self.parse_threads else 0
+        )
         self._last_map_index = None
 
         self.log_list.blockSignals(True)
@@ -885,6 +892,7 @@ class MainWindow(QMainWindow):
         self.log_visibility[name] = item.checkState() == Qt.CheckState.Checked
         self.apply_plot_selection()
         self.map_widget.reset_tracks()
+        self._schedule_full_paths_refresh(delay_ms=0)
         self.map_widget.update_positions(self._selected_positions_at(self.engine.index))
         self._last_map_index = self.engine.index
         self._update_console_for_index(self.engine.index)
@@ -936,8 +944,6 @@ class MainWindow(QMainWindow):
         else:
             self._pending_console_index = index
         if isinstance(positions, dict):
-            if self._last_map_index is not None and index < self._last_map_index:
-                self.map_widget.reset_tracks()
             filtered_positions = {
                 name: payload
                 for name, payload in positions.items()
@@ -948,8 +954,7 @@ class MainWindow(QMainWindow):
 
     def on_map_dots_toggled(self, checked: bool) -> None:
         self.map_widget.set_show_dots(checked)
-        # Rebuild track from current playback point onward.
-        self.map_widget.reset_tracks()
+        self._schedule_full_paths_refresh(delay_ms=0)
         self.map_widget.update_positions(self._selected_positions_at(self.engine.index))
         self._last_map_index = self.engine.index
 
@@ -1021,6 +1026,38 @@ class MainWindow(QMainWindow):
             self._cn0_receivers_for_view(),
         )
 
+    def _selected_full_paths(self) -> dict[str, list[dict[str, float]]]:
+        paths: dict[str, list[dict[str, float]]] = {}
+        for name, ds in self.engine.datasets.items():
+            if not self.log_visibility.get(name, True):
+                continue
+
+            points: list[dict[str, float]] = []
+            for point in ds.points:
+                if point.latitude is None or point.longitude is None:
+                    continue
+                points.append(
+                    {
+                        "lat": float(point.latitude),
+                        "lon": float(point.longitude),
+                    }
+                )
+
+            if points:
+                paths[name] = points
+
+        return paths
+
+    def _schedule_full_paths_refresh(self, delay_ms: int) -> None:
+        if self._full_paths_update_scheduled:
+            return
+        self._full_paths_update_scheduled = True
+        QTimer.singleShot(max(0, delay_ms), self._flush_full_paths_refresh)
+
+    def _flush_full_paths_refresh(self) -> None:
+        self._full_paths_update_scheduled = False
+        self.map_widget.set_full_paths(self._selected_full_paths())
+
     def _plot_cursor_time_at(self, index: int):
         selected_datasets = [
             ds for name, ds in self.engine.datasets.items() if self.log_visibility.get(name, True)
@@ -1040,15 +1077,52 @@ class MainWindow(QMainWindow):
         for name, ds in self.engine.datasets.items():
             if not self.log_visibility.get(name, True):
                 continue
-            _, point = self.engine.resolve_dataset_point(ds, index)
+            point_idx, point = self.engine.resolve_dataset_point(ds, index)
             if not point:
                 continue
             positions[name] = {
                 "lat": point.latitude,
                 "lon": point.longitude,
                 "time": point.timestamp.isoformat(sep=" ") if point.timestamp else None,
+                "heading": self._heading_for_dataset_point(ds, point_idx),
             }
         return positions
+
+    def _heading_for_dataset_point(self, dataset: NMEADataset, point_idx: int) -> float | None:
+        points = dataset.points
+        if point_idx < 0 or point_idx >= len(points):
+            return None
+
+        current = points[point_idx]
+        if current.latitude is None or current.longitude is None:
+            return None
+
+        cur_lat = float(current.latitude)
+        cur_lon = float(current.longitude)
+
+        # Prefer heading from current point toward the next valid point.
+        for idx in range(point_idx + 1, len(points)):
+            nxt = points[idx]
+            if nxt.latitude is None or nxt.longitude is None:
+                continue
+            nxt_lat = float(nxt.latitude)
+            nxt_lon = float(nxt.longitude)
+            if nxt_lat == cur_lat and nxt_lon == cur_lon:
+                continue
+            return self._bearing_degrees(cur_lat, cur_lon, nxt_lat, nxt_lon)
+
+        # Fallback for the tail of a track: previous valid point toward current.
+        for idx in range(point_idx - 1, -1, -1):
+            prev = points[idx]
+            if prev.latitude is None or prev.longitude is None:
+                continue
+            prev_lat = float(prev.latitude)
+            prev_lon = float(prev.longitude)
+            if prev_lat == cur_lat and prev_lon == cur_lon:
+                continue
+            return self._bearing_degrees(prev_lat, prev_lon, cur_lat, cur_lon)
+
+        return None
 
     def _update_console_for_index(self, index: int) -> None:
         font_metrics = self.console_view.fontMetrics()
@@ -1651,6 +1725,15 @@ class MainWindow(QMainWindow):
         a = sin(d_phi / 2.0) ** 2 + cos(phi1) * cos(phi2) * sin(d_lambda / 2.0) ** 2
         c = 2.0 * asin(min(1.0, sqrt(a)))
         return earth_radius_m * c
+
+    @staticmethod
+    def _bearing_degrees(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+        phi1 = radians(lat1)
+        phi2 = radians(lat2)
+        d_lambda = radians(lon2 - lon1)
+        y = sin(d_lambda) * cos(phi2)
+        x = cos(phi1) * sin(phi2) - sin(phi1) * cos(phi2) * cos(d_lambda)
+        return (degrees(atan2(y, x)) + 360.0) % 360.0
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         mime = event.mimeData()

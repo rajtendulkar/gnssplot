@@ -15,6 +15,7 @@ class MapWidget(QWidget):
         self._force_auto_zoom = True
         self._show_dots = False
         self._follow_playback = True
+        self._pending_full_paths: list[dict[str, list[dict[str, float | str | None]]]] = []
         self._pending_positions: list[dict[str, dict[str, float | str | None]]] = []
         self._pending_scripts: list[str] = []
 
@@ -39,8 +40,9 @@ class MapWidget(QWidget):
             </style>
             <script>
               let map;
-              let markers = {};
-              let polylines = {};
+              let arrowMarkers = {};
+              let previousPositions = {};
+              let fullPolylines = {};
               let dotLayers = {};
               let baseLayers = {};
               let currentBaseLayer = null;
@@ -96,51 +98,112 @@ class MapWidget(QWidget):
               }
 
               function clearMapData() {
-                Object.values(markers).forEach((m) => map.removeLayer(m));
-                Object.values(polylines).forEach((l) => map.removeLayer(l));
+                Object.values(arrowMarkers).forEach((m) => map.removeLayer(m));
+                Object.values(fullPolylines).forEach((l) => map.removeLayer(l));
                 Object.values(dotLayers).forEach((g) => map.removeLayer(g));
-                markers = {};
-                polylines = {};
+                arrowMarkers = {};
+                previousPositions = {};
+                fullPolylines = {};
                 dotLayers = {};
               }
 
-              function upsertReceiverMarker(receiver, lat, lng, timeText, forceAutoZoom, showDots, followPlayback) {
+              function buildArrowIcon(color, bearingDeg) {
+                // The glyph points to the right by default; subtract 90 deg so 0 deg means north.
+                const angle = Number.isFinite(bearingDeg) ? (bearingDeg - 90.0) : -90.0;
+                const html = `<div style="transform: rotate(${angle}deg); color:${color}; font-size: 18px; line-height: 18px; text-shadow: 0 0 2px rgba(0,0,0,0.8);">➤</div>`;
+                return L.divIcon({
+                  className: 'playback-arrow-icon',
+                  html: html,
+                  iconSize: [20, 20],
+                  iconAnchor: [10, 10]
+                });
+              }
+
+              function bearingDegrees(lat1, lng1, lat2, lng2) {
+                const toRad = (v) => v * Math.PI / 180.0;
+                const toDeg = (v) => v * 180.0 / Math.PI;
+
+                const phi1 = toRad(lat1);
+                const phi2 = toRad(lat2);
+                const dLon = toRad(lng2 - lng1);
+
+                const y = Math.sin(dLon) * Math.cos(phi2);
+                const x = Math.cos(phi1) * Math.sin(phi2) -
+                          Math.sin(phi1) * Math.cos(phi2) * Math.cos(dLon);
+                let brng = toDeg(Math.atan2(y, x));
+                brng = (brng + 360.0) % 360.0;
+                return brng;
+              }
+
+              function setFullPaths(pathsByReceiver, showDots) {
+                Object.values(fullPolylines).forEach((l) => map.removeLayer(l));
+                Object.values(dotLayers).forEach((g) => map.removeLayer(g));
+                fullPolylines = {};
+                dotLayers = {};
+
+                Object.entries(pathsByReceiver || {}).forEach(([receiver, points]) => {
+                  if (!Array.isArray(points) || points.length === 0) return;
+
+                  const color = colorForReceiver(receiver);
+                  const latlngs = [];
+
+                  points.forEach((p) => {
+                    const lat = p.lat;
+                    const lng = p.lon;
+                    if (lat === null || lng === null || lat === undefined || lng === undefined) return;
+                    latlngs.push([lat, lng]);
+                  });
+
+                  if (latlngs.length === 0) return;
+
+                  fullPolylines[receiver] = L.polyline(latlngs, {
+                    color: color,
+                    weight: 3,
+                    opacity: 0.85,
+                  }).addTo(map);
+
+                  if (showDots) {
+                    const group = L.layerGroup().addTo(map);
+                    latlngs.forEach((latlng) => {
+                      L.circleMarker(latlng, {
+                        radius: 3,
+                        color: color,
+                        fillColor: color,
+                        fillOpacity: 0.8,
+                        weight: 1,
+                      }).addTo(group);
+                    });
+                    dotLayers[receiver] = group;
+                  }
+                });
+              }
+
+              function upsertReceiverMarker(receiver, lat, lng, timeText, forceAutoZoom, followPlayback, headingOverride) {
                 if (lat === null || lng === null) return;
 
                 const position = [lat, lng];
                 const tooltip = `${receiver}<br/>${timeText || ''}<br/>${lat.toFixed(6)}, ${lng.toFixed(6)}`;
                 const color = colorForReceiver(receiver);
-
-                if (!markers[receiver]) {
-                  markers[receiver] = L.marker(position).addTo(map);
-                } else {
-                  markers[receiver].setLatLng(position);
+                const prev = previousPositions[receiver];
+                let bearing = 0;
+                if (Number.isFinite(headingOverride)) {
+                  bearing = headingOverride;
+                } else if (prev) {
+                  bearing = bearingDegrees(prev.lat, prev.lng, lat, lng);
                 }
+                previousPositions[receiver] = { lat: lat, lng: lng };
 
-                if (!polylines[receiver]) {
-                  polylines[receiver] = L.polyline([], {
-                    color: color,
-                    weight: 3,
-                    opacity: 0.85,
+                if (!arrowMarkers[receiver]) {
+                  arrowMarkers[receiver] = L.marker(position, {
+                    icon: buildArrowIcon(color, bearing),
                   }).addTo(map);
-                }
-                polylines[receiver].addLatLng(position);
-
-                if (!dotLayers[receiver]) {
-                  dotLayers[receiver] = L.layerGroup().addTo(map);
-                }
-                if (showDots) {
-                  L.circleMarker(position, {
-                    radius: 3,
-                    color: color,
-                    fillColor: color,
-                    fillOpacity: 0.8,
-                    weight: 1,
-                  }).addTo(dotLayers[receiver]);
+                } else {
+                  arrowMarkers[receiver].setLatLng(position);
+                  arrowMarkers[receiver].setIcon(buildArrowIcon(color, bearing));
                 }
 
-                markers[receiver].bindPopup(tooltip);
-                markers[receiver].bindTooltip(receiver, { permanent: false });
+                arrowMarkers[receiver].bindPopup(tooltip);
+                arrowMarkers[receiver].bindTooltip(receiver, { permanent: false });
 
                 if (forceAutoZoom) {
                   map.setView(position, 16);
@@ -154,7 +217,7 @@ class MapWidget(QWidget):
 
                 let bounds = null;
 
-                Object.values(polylines).forEach((line) => {
+                Object.values(fullPolylines).forEach((line) => {
                   const lineBounds = line.getBounds();
                   if (!lineBounds.isValid()) return;
                   if (bounds === null) {
@@ -164,7 +227,7 @@ class MapWidget(QWidget):
                   }
                 });
 
-                Object.values(markers).forEach((marker) => {
+                Object.values(arrowMarkers).forEach((marker) => {
                   const latlng = marker.getLatLng();
                   if (bounds === null) {
                     bounds = L.latLngBounds([latlng, latlng]);
@@ -198,10 +261,21 @@ class MapWidget(QWidget):
                 self.view.page().runJavaScript(script)
             self._pending_scripts.clear()
 
+        if self._pending_full_paths:
+          for full_paths in self._pending_full_paths:
+            self._apply_full_paths(full_paths)
+          self._pending_full_paths.clear()
+
         if self._pending_positions:
             for positions in self._pending_positions:
                 self._apply_positions(positions)
             self._pending_positions.clear()
+
+    def set_full_paths(self, paths_by_receiver: dict[str, list[dict[str, float | str | None]]]) -> None:
+        if not self._loaded:
+            self._pending_full_paths.append(paths_by_receiver)
+            return
+        self._apply_full_paths(paths_by_receiver)
 
     def update_positions(self, positions: dict[str, dict[str, float | str | None]]) -> None:
         if not self._loaded:
@@ -216,14 +290,14 @@ class MapWidget(QWidget):
         self._show_dots = enabled
 
     def set_follow_playback(self, enabled: bool) -> None:
-      self._follow_playback = enabled
+        self._follow_playback = enabled
 
     def fit_visible(self) -> None:
-      self._run_js("fitAllData();")
+        self._run_js("fitAllData();")
 
     def set_map_view(self, view_name: str) -> None:
-      safe_view = view_name if view_name in {"street", "satellite", "topographic"} else "street"
-      self._run_js(f"setBaseLayer({json.dumps(safe_view)});")
+        safe_view = view_name if view_name in {"street", "satellite", "topographic"} else "street"
+        self._run_js(f"setBaseLayer({json.dumps(safe_view)});")
 
     def reset_tracks(self) -> None:
         self._force_auto_zoom = True
@@ -241,6 +315,7 @@ class MapWidget(QWidget):
             lat = payload.get("lat")
             lon = payload.get("lon")
             time_text = payload.get("time")
+            heading = payload.get("heading")
             if lat is None or lon is None:
                 continue
 
@@ -251,8 +326,8 @@ class MapWidget(QWidget):
                 float(lon),
                 json.dumps(time_text),
                 "true" if do_auto_zoom else "false",
-                "true" if self._show_dots else "false",
-              "true" if self._follow_playback else "false",
+                "true" if self._follow_playback else "false",
+              json.dumps(float(heading)) if isinstance(heading, (float, int)) else "null",
             )
             self._run_js(script)
             if do_auto_zoom:
@@ -260,3 +335,10 @@ class MapWidget(QWidget):
 
         if auto_zoom_applied:
             self._force_auto_zoom = False
+
+    def _apply_full_paths(self, paths_by_receiver: dict[str, list[dict[str, float | str | None]]]) -> None:
+        script = "setFullPaths(%s, %s);" % (
+            json.dumps(paths_by_receiver),
+            "true" if self._show_dots else "false",
+        )
+        self._run_js(script)
