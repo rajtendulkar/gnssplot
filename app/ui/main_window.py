@@ -8,7 +8,7 @@ from pathlib import Path
 from statistics import median
 
 from PyQt6.QtCore import QEvent, QTimer, Qt
-from PyQt6.QtGui import QColor, QDragEnterEvent, QDropEvent, QTextCharFormat, QTextCursor
+from PyQt6.QtGui import QAction, QColor, QDragEnterEvent, QDropEvent, QTextCharFormat, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -91,9 +91,6 @@ class MainWindow(QMainWindow):
         self._map_is_popped_out = False
         self.map_popout_window.installEventFilter(self)
 
-        self.load_button = QPushButton("Add NMEA Logs")
-        self.remove_button = QPushButton("Remove Selected")
-        self.clear_button = QPushButton("Clear Logs")
         self.play_button = QToolButton(self)
         self.play_button.setText("")
         self.play_button.setToolTip("Play")
@@ -114,9 +111,6 @@ class MainWindow(QMainWindow):
         self.step_button.setFixedWidth(34)
         self.step_button.setEnabled(False)
         self.reset_plots_button = QPushButton("Reset Plots")
-        self.export_button = QPushButton("Export Report Bundle")
-        self.save_session_button = QPushButton("Save Session")
-        self.restore_session_button = QPushButton("Restore Session")
         self.map_tab_popout_button = QPushButton("Pop Out")
         self.map_fit_button = QPushButton("Fit Visible")
         self.map_follow_checkbox = QCheckBox("Follow Playback")
@@ -174,6 +168,7 @@ class MainWindow(QMainWindow):
         self.index_label.setObjectName("toolbarInfo")
         self._setup_transport_icons()
 
+        self._build_menu_bar()
         self._build_toolbar()
         self._build_ui()
         self._apply_theme("dark")
@@ -189,23 +184,41 @@ class MainWindow(QMainWindow):
         self.stop_button.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_MediaStop))
         self.step_button.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_MediaSkipForward))
 
+    def _build_menu_bar(self) -> None:
+        menu_bar = self.menuBar()
+
+        file_menu = menu_bar.addMenu("File")
+        self.action_save_session = QAction("Save Session", self)
+        self.action_restore_session = QAction("Restore Session", self)
+        self.action_exit = QAction("Exit", self)
+        file_menu.addAction(self.action_save_session)
+        file_menu.addAction(self.action_restore_session)
+        file_menu.addSeparator()
+        file_menu.addAction(self.action_exit)
+
+        logs_menu = menu_bar.addMenu("Logs")
+        self.action_add_logs = QAction("Add NMEA Logs", self)
+        self.action_remove_selected_logs = QAction("Remove Selected Logs", self)
+        self.action_clear_logs = QAction("Clear Logs", self)
+        logs_menu.addAction(self.action_add_logs)
+        logs_menu.addAction(self.action_remove_selected_logs)
+        logs_menu.addAction(self.action_clear_logs)
+
+        data_menu = menu_bar.addMenu("Data")
+        self.action_export_report = QAction("Export Report Bundle", self)
+        data_menu.addAction(self.action_export_report)
+
     def _build_toolbar(self) -> None:
         toolbar = QToolBar("Main", self)
         toolbar.setMovable(False)
         toolbar.setObjectName("mainToolbar")
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
 
-        toolbar.addWidget(self.load_button)
-        toolbar.addWidget(self.remove_button)
-        toolbar.addWidget(self.clear_button)
         toolbar.addWidget(self.play_button)
         toolbar.addWidget(self.pause_button)
         toolbar.addWidget(self.stop_button)
         toolbar.addWidget(self.step_button)
         toolbar.addWidget(self.reset_plots_button)
-        toolbar.addWidget(self.export_button)
-        toolbar.addWidget(self.save_session_button)
-        toolbar.addWidget(self.restore_session_button)
 
         toolbar.addSeparator()
         toolbar.addWidget(QLabel("Playback:"))
@@ -302,17 +315,18 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
 
     def _wire_signals(self) -> None:
-        self.load_button.clicked.connect(self.load_logs)
-        self.remove_button.clicked.connect(self.remove_selected_logs)
-        self.clear_button.clicked.connect(self.clear_logs)
         self.play_button.clicked.connect(self.on_play_clicked)
         self.pause_button.clicked.connect(self.on_pause_clicked)
         self.stop_button.clicked.connect(self.on_stop_clicked)
         self.step_button.clicked.connect(self.on_step_clicked)
         self.reset_plots_button.clicked.connect(self.plot_widget.reset_all_views)
-        self.export_button.clicked.connect(self.export_summary)
-        self.save_session_button.clicked.connect(self.save_session)
-        self.restore_session_button.clicked.connect(self.restore_session)
+        self.action_save_session.triggered.connect(self.save_session)
+        self.action_restore_session.triggered.connect(self.restore_session)
+        self.action_exit.triggered.connect(self.close)
+        self.action_add_logs.triggered.connect(self.load_logs)
+        self.action_remove_selected_logs.triggered.connect(self.remove_selected_logs)
+        self.action_clear_logs.triggered.connect(self.clear_logs)
+        self.action_export_report.triggered.connect(self.export_summary)
         self.map_tab_popout_button.clicked.connect(self.toggle_map_popout)
         self.map_fit_button.clicked.connect(self.on_map_fit_visible)
         self.map_follow_checkbox.toggled.connect(self.on_map_follow_toggled)
@@ -343,6 +357,32 @@ class MainWindow(QMainWindow):
             QMainWindow { background: #eef2f7; }
             QWidget { color: #1e293b; font-size: 12px; }
             QToolBar#mainToolbar { background: #f8fafc; border: 0; spacing: 8px; padding: 6px; }
+            QMenuBar {
+                background: #f8fafc;
+                color: #0f172a;
+                border-bottom: 1px solid #d7e0ea;
+            }
+            QMenuBar::item {
+                background: transparent;
+                color: #0f172a;
+                padding: 4px 10px;
+            }
+            QMenuBar::item:selected {
+                background: #e2e8f0;
+                border-radius: 4px;
+            }
+            QMenu {
+                background: #ffffff;
+                color: #0f172a;
+                border: 1px solid #cbd5e1;
+            }
+            QMenu::item {
+                padding: 6px 22px;
+            }
+            QMenu::item:selected {
+                background: #bfdbfe;
+                color: #0f172a;
+            }
             QToolBar#mainToolbar QToolButton, QPushButton {
                 background: #ffffff; border: 1px solid #cbd5e1; border-radius: 7px;
                 padding: 6px 10px; color: #0f172a;
@@ -451,6 +491,32 @@ class MainWindow(QMainWindow):
             QMainWindow { background: #0f172a; }
             QWidget { color: #e2e8f0; font-size: 12px; }
             QToolBar#mainToolbar { background: #111827; border: 0; spacing: 8px; padding: 6px; }
+            QMenuBar {
+                background: #111827;
+                color: #e2e8f0;
+                border-bottom: 1px solid #1f2a3d;
+            }
+            QMenuBar::item {
+                background: transparent;
+                color: #e2e8f0;
+                padding: 4px 10px;
+            }
+            QMenuBar::item:selected {
+                background: #1f2937;
+                border-radius: 4px;
+            }
+            QMenu {
+                background: #0b1220;
+                color: #e2e8f0;
+                border: 1px solid #334155;
+            }
+            QMenu::item {
+                padding: 6px 22px;
+            }
+            QMenu::item:selected {
+                background: #1d4e89;
+                color: #eff6ff;
+            }
             QToolBar#mainToolbar QToolButton, QPushButton {
                 background: #1f2937; border: 1px solid #334155; border-radius: 7px;
                 padding: 6px 10px; color: #e2e8f0;

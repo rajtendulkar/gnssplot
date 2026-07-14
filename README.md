@@ -14,6 +14,10 @@ A modular desktop tool to compare GNSS receiver performance from NMEA logs.
 - Optional CSV summary export.
 - Live UART ingest from serial GNSS receivers (runtime NMEA streaming).
 - Save and restore analysis sessions (loaded files + UI playback/view state).
+- Menu bar shortcuts:
+  - File -> Save Session, Restore Session, Exit
+  - Logs -> Add NMEA Logs, Remove Selected Logs, Clear Logs
+  - Data -> Export Report Bundle
 
 ## Project Structure
 
