@@ -42,6 +42,8 @@ class MapWidget(QWidget):
               let markers = {};
               let polylines = {};
               let dotLayers = {};
+              let baseLayers = {};
+              let currentBaseLayer = null;
 
               const lineColors = [
                 '#2563eb', '#dc2626', '#16a34a', '#ea580c',
@@ -59,10 +61,38 @@ class MapWidget(QWidget):
 
               function initMap() {
                 map = L.map('map', { zoomControl: true }).setView([0, 0], 2);
-                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+
+                baseLayers.street = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
                   maxZoom: 19,
                   attribution: '&copy; OpenStreetMap contributors'
-                }).addTo(map);
+                });
+
+                baseLayers.satellite = L.tileLayer(
+                  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+                  {
+                    maxZoom: 19,
+                    attribution: 'Tiles &copy; Esri'
+                  }
+                );
+
+                baseLayers.topographic = L.tileLayer(
+                  'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
+                  {
+                    maxZoom: 17,
+                    attribution: 'Map data: &copy; OpenStreetMap contributors, SRTM | Map style: &copy; OpenTopoMap'
+                  }
+                );
+
+                setBaseLayer('street');
+              }
+
+              function setBaseLayer(viewName) {
+                if (!map || !baseLayers[viewName]) return;
+                if (currentBaseLayer) {
+                  map.removeLayer(currentBaseLayer);
+                }
+                currentBaseLayer = baseLayers[viewName];
+                currentBaseLayer.addTo(map);
               }
 
               function clearMapData() {
@@ -190,6 +220,10 @@ class MapWidget(QWidget):
 
     def fit_visible(self) -> None:
       self._run_js("fitAllData();")
+
+    def set_map_view(self, view_name: str) -> None:
+      safe_view = view_name if view_name in {"street", "satellite", "topographic"} else "street"
+      self._run_js(f"setBaseLayer({json.dumps(safe_view)});")
 
     def reset_tracks(self) -> None:
         self._force_auto_zoom = True

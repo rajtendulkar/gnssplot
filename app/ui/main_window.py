@@ -117,6 +117,11 @@ class MainWindow(QMainWindow):
         self.map_fit_button = QPushButton("Fit Visible")
         self.map_follow_checkbox = QCheckBox("Follow Playback")
         self.map_follow_checkbox.setChecked(True)
+        self.map_view_box = QComboBox()
+        self.map_view_box.addItem("Street", "street")
+        self.map_view_box.addItem("Satellite", "satellite")
+        self.map_view_box.addItem("Topographic", "topographic")
+        self.map_view_box.setCurrentIndex(0)
 
         self.speed_box = QComboBox()
         self.speed_box.addItems(["0.5x", "1x", "2x", "4x"])
@@ -298,6 +303,8 @@ class MainWindow(QMainWindow):
         map_tab_layout.setContentsMargins(0, 0, 0, 0)
 
         map_head = QHBoxLayout()
+        map_head.addWidget(QLabel("View:"))
+        map_head.addWidget(self.map_view_box)
         map_head.addWidget(self.map_follow_checkbox)
         map_head.addWidget(self.map_fit_button)
         map_head.addStretch(1)
@@ -350,6 +357,7 @@ class MainWindow(QMainWindow):
         self.map_tab_popout_button.clicked.connect(self.toggle_map_popout)
         self.map_fit_button.clicked.connect(self.on_map_fit_visible)
         self.map_follow_checkbox.toggled.connect(self.on_map_follow_toggled)
+        self.map_view_box.currentIndexChanged.connect(self.on_map_view_changed)
         self.accuracy_widget.reference_changed.connect(self.on_reference_changed)
 
         self.speed_box.currentTextChanged.connect(self.change_speed)
@@ -947,6 +955,11 @@ class MainWindow(QMainWindow):
 
     def on_map_follow_toggled(self, checked: bool) -> None:
         self.map_widget.set_follow_playback(checked)
+
+    def on_map_view_changed(self, _idx: int) -> None:
+        view_data = self.map_view_box.currentData()
+        view = view_data if view_data in ("street", "satellite", "topographic") else "street"
+        self.map_widget.set_map_view(view)
 
     def on_map_fit_visible(self) -> None:
         self.map_widget.fit_visible()
