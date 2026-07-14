@@ -157,6 +157,16 @@ class MainWindow(QMainWindow):
         self.console_error_checkbox.setChecked(True)
         self.console_prev_error_button = QPushButton("Prev Error")
         self.console_next_error_button = QPushButton("Next Error")
+        self.add_log_button = QToolButton(self)
+        self.add_log_button.setText("+")
+        self.add_log_button.setToolTip("Add NMEA Logs")
+        self.add_log_button.setFixedWidth(30)
+        self.add_log_button.setObjectName("logActionButton")
+        self.remove_log_button = QToolButton(self)
+        self.remove_log_button.setText("-")
+        self.remove_log_button.setToolTip("Remove Selected Logs")
+        self.remove_log_button.setFixedWidth(30)
+        self.remove_log_button.setObjectName("logActionButton")
 
         self.log_list = QListWidget()
         self.log_list.setMaximumWidth(280)
@@ -255,9 +265,14 @@ class MainWindow(QMainWindow):
         sidebar = QWidget()
         sidebar.setObjectName("sidePanel")
         sidebar_layout = QVBoxLayout(sidebar)
+        side_title_row = QHBoxLayout()
         side_title = QLabel("Loaded Logs")
         side_title.setObjectName("sectionTitle")
-        sidebar_layout.addWidget(side_title)
+        side_title_row.addWidget(side_title)
+        side_title_row.addStretch(1)
+        side_title_row.addWidget(self.add_log_button)
+        side_title_row.addWidget(self.remove_log_button)
+        sidebar_layout.addLayout(side_title_row)
         sidebar_layout.addWidget(self.log_list)
 
         plots_tab = QWidget(self)
@@ -320,6 +335,8 @@ class MainWindow(QMainWindow):
         self.stop_button.clicked.connect(self.on_stop_clicked)
         self.step_button.clicked.connect(self.on_step_clicked)
         self.reset_plots_button.clicked.connect(self.plot_widget.reset_all_views)
+        self.add_log_button.clicked.connect(self.load_logs)
+        self.remove_log_button.clicked.connect(self.remove_selected_logs)
         self.action_save_session.triggered.connect(self.save_session)
         self.action_restore_session.triggered.connect(self.restore_session)
         self.action_exit.triggered.connect(self.close)
@@ -418,6 +435,22 @@ class MainWindow(QMainWindow):
             QWidget#sidePanel { background: #f8fafc; border: 1px solid #d7e0ea; border-radius: 10px; }
             QLabel#sectionTitle {
                 color: #0f4c81; font-size: 13px; font-weight: 600; padding: 4px 2px;
+            }
+            QToolButton#logActionButton {
+                background: #ffffff;
+                color: #0f172a;
+                border: 1px solid #cbd5e1;
+                border-radius: 6px;
+                font-weight: 700;
+                min-width: 28px;
+                min-height: 24px;
+            }
+            QToolButton#logActionButton:hover {
+                background: #f1f5f9;
+                border-color: #7aa2d6;
+            }
+            QToolButton#logActionButton:pressed {
+                background: #e2e8f0;
             }
             QLabel#toolbarInfo { color: #0f4c81; font-weight: 600; }
             QListWidget#logList {
@@ -552,6 +585,22 @@ class MainWindow(QMainWindow):
             QWidget#sidePanel { background: #111827; border: 1px solid #1f2a3d; border-radius: 10px; }
             QLabel#sectionTitle {
                 color: #bfdbfe; font-size: 13px; font-weight: 600; padding: 4px 2px;
+            }
+            QToolButton#logActionButton {
+                background: #334155;
+                color: #f8fafc;
+                border: 1px solid #64748b;
+                border-radius: 6px;
+                font-weight: 700;
+                min-width: 28px;
+                min-height: 24px;
+            }
+            QToolButton#logActionButton:hover {
+                background: #475569;
+                border-color: #93c5fd;
+            }
+            QToolButton#logActionButton:pressed {
+                background: #1e293b;
             }
             QLabel#toolbarInfo { color: #bfdbfe; font-weight: 600; }
             QListWidget#logList {
